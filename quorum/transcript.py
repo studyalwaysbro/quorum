@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -18,6 +19,7 @@ class Turn:
     model: str
     prompt: str
     response: str
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -25,8 +27,15 @@ class Transcript:
     question: str
     turns: list[Turn] = field(default_factory=list)
 
-    def record(self, round: str, model: str, prompt: str, response: str) -> None:
-        self.turns.append(Turn(round, model, prompt, response))
+    def record(
+        self,
+        round: str,
+        model: str,
+        prompt: str,
+        response: str,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        self.turns.append(Turn(round, model, prompt, response, meta or {}))
 
     def by_round(self, round: str) -> list[Turn]:
         return [t for t in self.turns if t.round == round]
@@ -41,5 +50,14 @@ class Transcript:
     def from_json(cls, text: str) -> "Transcript":
         data = json.loads(text)
         t = cls(question=data["question"])
-        t.turns = [Turn(**turn) for turn in data["turns"]]
+        t.turns = [
+            Turn(
+                round=turn["round"],
+                model=turn["model"],
+                prompt=turn["prompt"],
+                response=turn["response"],
+                meta=dict(turn.get("meta", {})),
+            )
+            for turn in data["turns"]
+        ]
         return t

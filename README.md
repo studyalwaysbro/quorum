@@ -60,6 +60,10 @@ objection — and must either incorporate the objection or explain why it doesn'
 hold. Where the council truly disagreed, the synthesis says so rather than
 papering over it.
 
+By default, the synthesizer is the first council member for compatibility.
+That is convenient, but it can favor the member's own blind answer; prefer a
+non-member synthesizer, or the strongest available model, when you can.
+
 ---
 
 ## The protocol
@@ -68,6 +72,11 @@ papering over it.
                   ┌─────────── blind round ───────────┐
    question ───►  │  each model answers independently  │
                   │      (no sight of the others)      │
+                  └──────────────────┬─────────────────┘
+                                     ▼
+                  ┌──── optional categorical vote ─────┐
+                  │  each member classifies its own     │
+                  │  blind answer + confidence          │
                   └──────────────────┬─────────────────┘
                                      ▼
                   ┌────────── critique round ──────────┐
@@ -86,6 +95,11 @@ papering over it.
                   │  attack map claims / assumptions    │
                   └──────────────────┬─────────────────┘
                                      ▼
+                  ┌──── optional revote / flip log ────┐
+                  │  members see anonymous map + tally  │
+                  │  and may revise once                │
+                  └──────────────────┬─────────────────┘
+                                     ▼
                   ┌────────── synthesis round ─────────┐
                   │  one model reads the FULL           │
                   │  transcript → final answer          │
@@ -102,6 +116,52 @@ verbatim critique claims are treated as agreements. Pass `distiller=...` to
 `Council` when you want a model to build a semantic map across paraphrases.
 Blind and critique fan-out run concurrently by default while transcript turns
 are still recorded in member order; pass `max_workers=...` to cap that fan-out.
+Critique and adversarial prompts shuffle blind-answer order deterministically
+from `seed=...` and record the permutation in transcript metadata.
+
+---
+
+## Measure your council
+
+Pass labels to `ask()` when you want a measurable categorical decision:
+
+```python
+from quorum import Council, EchoModel, RecordStore, summary
+
+store = RecordStore("quorum-votes.jsonl")
+members = [
+    EchoModel("alice", "VERDICT: insertion\nCONFIDENCE: 4"),
+    EchoModel("bob", "VERDICT: timsort\nCONFIDENCE: 5"),
+]
+council = Council(members=members, store=store)
+
+verdict = council.ask(
+    "Best sort for a nearly-sorted 10k-element list?",
+    labels=["insertion", "timsort"],
+    revote=True,
+)
+print(verdict.tally, verdict.majority, verdict.flips)
+
+report = summary(store.votes_by_item(), labels=["insertion", "timsort"])
+print(report.fleiss_kappa, report.gwet_ac1, report.n_effective)
+```
+
+`VoteRecord` JSONL files are append-only artifacts: every labeled ask stores
+the question, labels, votes, confidences, optional truth label, and optional
+revotes. Feed `RecordStore.votes_by_item()` into `quorum.summary()` to track
+raw agreement, pairwise Cohen kappas, Fleiss kappa, Krippendorff alpha, Gwet's
+AC1, redundancy, and effective council size over time.
+
+High raw agreement with low kappa is the kappa paradox: skewed label marginals
+can make real agreement look weak after chance correction. In that case, check
+Gwet's AC1 alongside kappa because AC1 is less brittle under heavy prevalence
+skew.
+
+Redundancy is a member's mean pairwise kappa against the rest of the council.
+A member at kappa `0.97` against another member is probably a clone: cost
+without much new signal. `n_effective` turns average pairwise kappa into an
+independent-voter estimate, so a five-member council might only be worth 2.3
+independent voters.
 
 ---
 

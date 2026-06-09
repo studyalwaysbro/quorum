@@ -21,11 +21,13 @@ Design choices that are easy to get wrong and matter a lot:
 from __future__ import annotations
 
 import re
+import random
+from hashlib import sha256
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Sequence
 
 from quorum.adapters import Model
-from quorum.transcript import Transcript
+from quorum.transcript import Transcript, Turn
 
 
 def _worker_count(model_count: int, max_workers: Optional[int]) -> int:
@@ -57,6 +59,45 @@ def _gather(
         return list(executor.map(complete, models))
 
 
+def _stable_seed(seed: int, *parts: str) -> int:
+    blob = ":".join([str(seed), *parts]).encode("utf-8")
+    return int.from_bytes(sha256(blob).digest()[:8], "big")
+
+
+def _shuffled_turns(turns: Sequence[Turn], seed: int, role: str, critic: str) -> tuple[list[Turn], list[int]]:
+    order = list(range(len(turns)))
+    random.Random(_stable_seed(seed, role, critic)).shuffle(order)
+    return [turns[i] for i in order], [i + 1 for i in order]
+
+
+def _answer_pool(turns: Sequence[Turn]) -> str:
+    return "\n\n".join(
+        f"ANSWER {i + 1}:\n{turn.response}" for i, turn in enumerate(turns)
+    )
+
+
+def _gather_prepared(
+    jobs: Sequence[tuple[Model, str, dict]],
+    max_workers: Optional[int] = None,
+) -> list[tuple[str, str, str, dict]]:
+    """Run per-model prompts concurrently, preserving input job order."""
+    workers = _worker_count(len(jobs), max_workers)
+    if workers == 0:
+        return []
+    if workers == 1:
+        return [
+            (model.name, prompt, model.complete(prompt), meta)
+            for model, prompt, meta in jobs
+        ]
+
+    def complete(job: tuple[Model, str, dict]) -> tuple[str, str, str, dict]:
+        model, prompt, meta = job
+        return model.name, prompt, model.complete(prompt), meta
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(complete, jobs))
+
+
 def blind_round(
     models: Sequence[Model],
     question: str,
@@ -78,22 +119,34 @@ def critique_round(
     question: str,
     t: Transcript,
     max_workers: Optional[int] = None,
+    seed: int = 0,
 ) -> None:
     """Each model sees all blind answers (anonymized) and critiques them —
     where they agree, where they diverge, and which reasoning is strongest."""
     blind = t.by_round("blind")
-    pool = "\n\n".join(
-        f"ANSWER {i + 1}:\n{turn.response}" for i, turn in enumerate(blind)
-    )
-    prompt = (
-        "Below are independent answers to the question. They are "
-        "anonymized. Identify where they AGREE and where they DIVERGE. "
-        "Point to the single strongest line of reasoning and the single "
-        "weakest. Do not just average them.\n\n"
-        f"QUESTION:\n{question}\n\n{pool}"
-    )
-    for name, resp in _gather(models, prompt, max_workers=max_workers):
-        t.record("critique", name, prompt, resp)
+    jobs = []
+    for model in models:
+        shuffled, permutation = _shuffled_turns(blind, seed, "critique", model.name)
+        prompt = (
+            "Below are independent answers to the question. They are "
+            "anonymized and their order has been randomized for you. Identify "
+            "where they AGREE and where they DIVERGE. Point to the single "
+            "strongest line of reasoning and the single weakest. Do not just "
+            "average them.\n\n"
+            f"QUESTION:\n{question}\n\n{_answer_pool(shuffled)}"
+        )
+        jobs.append(
+            (
+                model,
+                prompt,
+                {
+                    "answer_permutation": permutation,
+                    "answer_models": [turn.model for turn in shuffled],
+                },
+            )
+        )
+    for name, prompt, resp, meta in _gather_prepared(jobs, max_workers=max_workers):
+        t.record("critique", name, prompt, resp, meta=meta)
 
 
 def _split_claims(text: str) -> list[str]:
@@ -113,7 +166,7 @@ def consensus_map_round(
     """Build a replayable map of critique agreement and unresolved issues."""
     critiques = t.by_round("critique")
     critique_pool = "\n\n".join(
-        f"CRITIQUE {i + 1} [{turn.model}]:\n{turn.response}"
+        f"CRITIQUE {i + 1}:\n{turn.response}"
         for i, turn in enumerate(critiques)
     )
     if distiller is not None:
@@ -122,7 +175,8 @@ def consensus_map_round(
             "map. Group claims that agree in meaning even when the wording "
             "differs. Preserve unresolved divergences, assumptions, and one-off "
             "concerns. Base the map only on the critiques below; do not add new "
-            "facts.\n\n"
+            "facts. Refer to critiques only by CRITIQUE 1, CRITIQUE 2, and so "
+            "on; do not use model or member names.\n\n"
             "Use this shape:\n"
             "CONSENSUS / ISSUE MAP\n\n"
             "CRITIQUE AGREEMENTS\n"
@@ -131,7 +185,13 @@ def consensus_map_round(
             "- ...\n\n"
             f"QUESTION:\n{question}\n\nCRITIQUES:\n{critique_pool}"
         )
-        t.record("consensus_map", distiller.name, prompt, distiller.complete(prompt))
+        t.record(
+            "consensus_map",
+            distiller.name,
+            prompt,
+            distiller.complete(prompt),
+            meta={"critique_models": [turn.model for turn in critiques]},
+        )
         return
 
     prompt = "[deterministic distillation - no model called]"
@@ -167,7 +227,7 @@ def consensus_map_round(
     ]
     if agreements:
         lines.extend(
-            f"- {claim} (raised by: {', '.join(models)})"
+            f"- {claim} (raised by {len(models)} of {len(critiques)} critics)"
             for claim, models in agreements
         )
     elif critiques:
@@ -181,7 +241,7 @@ def consensus_map_round(
     lines.extend(["", "UNRESOLVED DIVERGENCES / OPEN ASSUMPTIONS"])
     if unresolved:
         lines.extend(
-            f"- {claim} (raised by: {', '.join(models)})"
+            f"- {claim} (raised by {len(models)} of {len(critiques)} critics)"
             for claim, models in unresolved
         )
     elif critiques:
@@ -189,15 +249,29 @@ def consensus_map_round(
     else:
         lines.append("- With no critique round, no cross-model assumptions were tested.")
 
-    t.record("consensus_map", "quorum", prompt, "\n".join(lines))
+    t.record(
+        "consensus_map",
+        "quorum",
+        prompt,
+        "\n".join(lines),
+        meta={
+            "agreements": [
+                {"claim": claim, "models": models}
+                for claim, models in agreements
+            ],
+            "unresolved": [
+                {"claim": claim, "models": models}
+                for claim, models in unresolved
+            ],
+        },
+    )
 
 
-def adversarial_round(skeptic: Model, question: str, t: Transcript) -> None:
+def adversarial_round(skeptic: Model, question: str, t: Transcript, seed: int = 0) -> None:
     """A dedicated skeptic tries to refute the consensus/issue map."""
     blind = t.by_round("blind")
-    pool = "\n\n".join(
-        f"ANSWER {i + 1}:\n{turn.response}" for i, turn in enumerate(blind)
-    )
+    shuffled, permutation = _shuffled_turns(blind, seed, "adversarial", skeptic.name)
+    pool = _answer_pool(shuffled)
     maps = t.by_round("consensus_map")
     consensus = "\n\n".join(turn.response for turn in maps)
     if not consensus:
@@ -213,7 +287,16 @@ def adversarial_round(skeptic: Model, question: str, t: Transcript) -> None:
         f"CONSENSUS / ISSUE MAP:\n{consensus}\n\n"
         f"INDEPENDENT ANSWERS:\n{pool}"
     )
-    t.record("adversarial", skeptic.name, prompt, skeptic.complete(prompt))
+    t.record(
+        "adversarial",
+        skeptic.name,
+        prompt,
+        skeptic.complete(prompt),
+        meta={
+            "answer_permutation": permutation,
+            "answer_models": [turn.model for turn in shuffled],
+        },
+    )
 
 
 def synthesis_round(synthesizer: Model, question: str, t: Transcript) -> str:
@@ -222,13 +305,18 @@ def synthesis_round(synthesizer: Model, question: str, t: Transcript) -> str:
     sections = []
     for label, key in [
         ("INDEPENDENT ANSWERS", "blind"),
+        ("BLIND VOTES", "vote"),
         ("CRITIQUES", "critique"),
         ("CONSENSUS / ISSUE MAP", "consensus_map"),
         ("ADVERSARIAL OBJECTION", "adversarial"),
+        ("REVISED VOTES", "revote"),
     ]:
         turns = t.by_round(key)
         if turns:
-            body = "\n\n".join(f"[{turn.model}]\n{turn.response}" for turn in turns)
+            body = "\n\n".join(
+                f"{label.rstrip('S')} {i + 1}\n{turn.response}"
+                for i, turn in enumerate(turns)
+            )
             sections.append(f"=== {label} ===\n{body}")
     context = "\n\n".join(sections)
     prompt = (
