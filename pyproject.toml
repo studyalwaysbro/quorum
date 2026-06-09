@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quorum-council"
+version = "0.1.0"
+description = "A multi-model deliberation engine: blind, critique, adversarial, and synthesis rounds over a panel of language models."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["llm", "agents", "deliberation", "ensemble", "multi-model"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["quorum*"]
