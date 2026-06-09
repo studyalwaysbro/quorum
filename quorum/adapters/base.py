@@ -8,9 +8,10 @@ itself — you bring your own.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable, Protocol, Sequence
 
 
 class Model(Protocol):
@@ -49,22 +50,51 @@ class CLIModel:
     """
 
     name: str
-    argv: list[str]
-    timeout: int = 600
+    argv: Sequence[str]
+    timeout: float = 600
 
     def complete(self, prompt: str) -> str:
-        result = subprocess.run(
-            self.argv,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=self.timeout,
-        )
+        if not self.argv:
+            return f"[quorum CLIModel error: {self.name} has no command argv]"
+        try:
+            result = subprocess.run(
+                self.argv,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except FileNotFoundError:
+            return (
+                f"[quorum CLIModel error: {self.name} command not found: "
+                f"{self.argv[0]!r}]"
+            )
+        except subprocess.TimeoutExpired as exc:
+            details = _trim_output(exc.stderr or exc.stdout)
+            suffix = f"; output: {details}" if details else ""
+            return (
+                f"[quorum CLIModel error: {self.name} timed out after "
+                f"{self.timeout}s running {shlex.join(self.argv)}{suffix}]"
+            )
+        except OSError as exc:
+            return f"[quorum CLIModel error: {self.name} failed to start: {exc}]"
+
         if result.returncode != 0:
-            raise RuntimeError(
-                f"{self.name} exited {result.returncode}: {result.stderr.strip()[:500]}"
+            details = _trim_output(result.stderr or result.stdout)
+            suffix = f": {details}" if details else ""
+            return (
+                f"[quorum CLIModel error: {self.name} exited "
+                f"{result.returncode}{suffix}]"
             )
         return result.stdout.strip()
+
+
+def _trim_output(output: str | bytes | None, limit: int = 500) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        output = output.decode(errors="replace")
+    return output.strip()[:limit]
 
 
 @dataclass

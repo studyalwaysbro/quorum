@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 
 @dataclass
 class Turn:
-    round: str          # "blind", "critique", "adversarial", "synthesis"
+    round: str          # "blind", "critique", "consensus_map", etc.
     model: str
     prompt: str
     response: str

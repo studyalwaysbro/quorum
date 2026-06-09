@@ -12,6 +12,7 @@ council = Council(
              CLIModel("gpt-5.5", ["codex", "--quiet"]),
              CLIModel("gemini",  ["gemini", "-p"])],
     skeptic=None,          # optional adversarial-only member
+    distiller=None,        # optional semantic consensus-map model
 )
 verdict = council.ask("Which sort fits a nearly-sorted 10k-element list?")
 print(verdict.answer)
@@ -41,20 +42,23 @@ strictly blind: every model answers alone, seeing nothing.
 A 3-to-1 split isn't noise to be smoothed into a bland mean. It's the most
 valuable thing the council produces: it marks exactly where the problem is
 genuinely hard or underspecified. The critique round **surfaces** divergence
-instead of collapsing it.
+instead of collapsing it, and a consensus/issue map records what the critiques
+agreed on versus what remains unresolved.
 
 ### 3. A skeptic must be told to break things, not help
 A model asked to "improve" an answer behaves completely differently from one
 asked to "refute" it. Folding skepticism into a general critique gets you
-neither. Quorum runs the adversary as its own role with one job: find the
-wrong assumption, the missed edge case, the failure mode — and only concede if
-the answer genuinely survives.
+neither. Quorum runs the adversary as its own role with one job: attack the
+specific claims and assumptions in the consensus/issue map, find the wrong
+assumption, the missed edge case, the failure mode — and only concede if the
+answer genuinely survives.
 
 ### 4. Synthesis reads the whole transcript, including the objection
 The final answer isn't the most popular blind answer. One synthesizer reads
-every turn — answers, critiques, and the adversary's objection — and must
-either incorporate the objection or explain why it doesn't hold. Where the
-council truly disagreed, the synthesis says so rather than papering over it.
+every turn — answers, critiques, the consensus/issue map, and the adversary's
+objection — and must either incorporate the objection or explain why it doesn't
+hold. Where the council truly disagreed, the synthesis says so rather than
+papering over it.
 
 ---
 
@@ -72,9 +76,14 @@ council truly disagreed, the synthesis says so rather than papering over it.
                   │  agree / diverge / who's strongest  │
                   └──────────────────┬─────────────────┘
                                      ▼
+                  ┌────── consensus / issue map ───────┐
+                  │  records critique agreement and     │
+                  │  unresolved assumptions / splits    │
+                  └──────────────────┬─────────────────┘
+                                     ▼
                   ┌──────── adversarial round ─────────┐
                   │  a dedicated skeptic tries to       │
-                  │  refute the emerging consensus      │
+                  │  attack map claims / assumptions    │
                   └──────────────────┬─────────────────┘
                                      ▼
                   ┌────────── synthesis round ─────────┐
@@ -87,6 +96,12 @@ council truly disagreed, the synthesis says so rather than papering over it.
 
 Rounds are just functions (`quorum/rounds.py`). Compose your own protocol if
 this one doesn't fit your problem.
+
+By default, the consensus map is deterministic and conservative: only repeated
+verbatim critique claims are treated as agreements. Pass `distiller=...` to
+`Council` when you want a model to build a semantic map across paraphrases.
+Blind and critique fan-out run concurrently by default while transcript turns
+are still recorded in member order; pass `max_workers=...` to cap that fan-out.
 
 ---
 
@@ -114,9 +129,8 @@ python -m pytest          # offline, no keys needed
 
 ## Status
 
-v0.1 — core protocol, adapters, replayable transcripts, offline tests.
-Rounds run sequentially; parallel fan-out is a one-function change in
-`rounds.py`. Issues and PRs welcome.
+v0.1 — core protocol, adapters, replayable transcripts, optional semantic
+distillation, ordered parallel fan-out, and offline tests.
 
 ## License
 
