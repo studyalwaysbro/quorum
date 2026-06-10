@@ -121,6 +121,29 @@ from `seed=...` and record the permutation in transcript metadata.
 
 ---
 
+## Web UI — watch it deliberate live
+
+A streaming single-page UI shows each round arrive in real time: blind answers
+diverge, get critiqued, get distilled into a consensus map, get attacked by the
+skeptic, then synthesized into the final answer.
+
+```bash
+pip install -e ".[web]"      # adds fastapi + uvicorn
+python -m quorum.web          # then open http://127.0.0.1:8000
+```
+
+- **Demo mode** needs no API keys — keyless, round-aware stub models so the whole
+  mechanic runs instantly for anyone who clones the repo.
+- **Live mode** auto-detects CLI models on the host (`deepseek`, `gemini`,
+  `codex`, `grok`) and lets you pick which sit on the council and which is the
+  adversary.
+
+The backend streams over Server-Sent Events (`GET /api/stream`); the deliberation
+is driven round by round so turns are pushed the moment they land. Download the
+full replayable transcript from the result panel.
+
+---
+
 ## Measure your council
 
 Pass labels to `ask()` when you want a measurable categorical decision:

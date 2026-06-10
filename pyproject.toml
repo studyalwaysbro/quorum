@@ -14,9 +14,14 @@ dependencies = []
 
 [project.scripts]
 quorum = "quorum.cli:main"
+quorum-web = "quorum.web.__main__:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+web = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [tool.setuptools.packages.find]
 include = ["quorum*"]
+
+[tool.setuptools.package-data]
+"quorum.web" = ["static/*"]

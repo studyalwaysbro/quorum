@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Quorum — watch a council deliberate</title>
+<style>
+  :root {
+    --bg: #0a0e16;
+    --bg-2: #0f1521;
+    --panel: #141b29;
+    --panel-2: #18202f;
+    --border: #233048;
+    --text: #e6edf6;
+    --muted: #8595ad;
+    --faint: #5b6981;
+    --blue: #5aa9ff;
+    --amber: #f6b73c;
+    --violet: #b08bff;
+    --rose: #ff6b73;
+    --emerald: #3ddc97;
+    --radius: 14px;
+    --shadow: 0 10px 40px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: radial-gradient(1200px 700px at 80% -10%, #16203400, #0a0e16),
+                linear-gradient(180deg, #0b1019, var(--bg));
+    color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 28px 22px 80px; }
+
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+  .brand {
+    font-size: 30px; font-weight: 800; letter-spacing: -.5px;
+    background: linear-gradient(90deg, var(--blue), var(--violet) 60%, var(--emerald));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .brand .glyph { -webkit-text-fill-color: var(--violet); margin-right: 2px; }
+  .tagline { color: var(--muted); font-size: 14px; }
+  .ghlink { margin-left: auto; color: var(--muted); font-size: 13px; }
+  .ghlink:hover { color: var(--text); }
+  .lead { color: var(--muted); margin: 10px 0 22px; max-width: 680px; }
+  .lead b { color: var(--text); font-weight: 600; }
+
+  .card {
+    background: linear-gradient(180deg, var(--panel), var(--bg-2));
+    border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+
+  .composer { padding: 16px; }
+  textarea {
+    width: 100%; min-height: 78px; resize: vertical;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; font: inherit; outline: none;
+  }
+  textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #5aa9ff22; }
+
+  .examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 2px; }
+  .chip {
+    font-size: 12.5px; color: var(--muted); cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--border);
+    padding: 5px 10px; border-radius: 999px; transition: .15s;
+  }
+  .chip:hover { color: var(--text); border-color: var(--faint); }
+
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .group-label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-right: 2px; }
+
+  .toggle { display: inline-flex; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 3px; }
+  .toggle button { all: unset; cursor: pointer; padding: 5px 12px; border-radius: 999px; font-size: 13px; color: var(--muted); transition: .15s; }
+  .toggle button.active { background: var(--panel-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
+  .toggle button:disabled { opacity: .4; cursor: not-allowed; }
+
+  .members { display: flex; flex-wrap: wrap; gap: 8px; }
+  .mchip { user-select: none; cursor: pointer; font-size: 13px; padding: 6px 11px; border-radius: 999px;
+           background: var(--bg); border: 1px solid var(--border); color: var(--muted); transition: .15s; }
+  .mchip[data-on="1"] { color: var(--text); border-color: var(--blue); background: #5aa9ff14; }
+  .mchip.skeptic[data-on="1"] { border-color: var(--rose); background: #ff6b7314; }
+
+  .go {
+    margin-left: auto; all: unset; cursor: pointer;
+    background: linear-gradient(90deg, var(--blue), var(--violet));
+    color: #06101f; font-weight: 700; font-size: 14px;
+    padding: 10px 20px; border-radius: 10px; transition: .15s;
+  }
+  .go:hover { filter: brightness(1.07); }
+  .go:disabled { opacity: .5; cursor: progress; filter: none; }
+
+  /* timeline */
+  #results { margin-top: 26px; display: none; }
+  .stage { margin: 0 0 14px; }
+  .stage-head { display: flex; align-items: center; gap: 10px; margin: 18px 0 10px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 4px #ffffff08; flex: none; }
+  .stage[data-round="blind"] .dot { background: var(--blue); }
+  .stage[data-round="critique"] .dot { background: var(--amber); }
+  .stage[data-round="consensus_map"] .dot { background: var(--violet); }
+  .stage[data-round="adversarial"] .dot { background: var(--rose); }
+  .stage[data-round="synthesis"] .dot { background: var(--emerald); }
+  .stage-title { font-weight: 650; font-size: 15px; }
+  .stage-sub { color: var(--faint); font-size: 12.5px; }
+  .spin { width: 13px; height: 13px; border: 2px solid var(--border); border-top-color: var(--text); border-radius: 50%; animation: spin .7s linear infinite; margin-left: auto; }
+  .check { margin-left: auto; color: var(--emerald); font-size: 14px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .turn {
+    margin: 8px 0; padding: 13px 15px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-left: 3px solid var(--faint);
+    animation: rise .35s ease both;
+  }
+  .stage[data-round="blind"] .turn { border-left-color: var(--blue); }
+  .stage[data-round="critique"] .turn { border-left-color: var(--amber); }
+  .stage[data-round="consensus_map"] .turn { border-left-color: var(--violet); background: #b08bff0c; }
+  .stage[data-round="adversarial"] .turn { border-left-color: var(--rose); background: #ff6b730c; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .turn .who { font-size: 12px; font-weight: 700; letter-spacing: .02em; margin-bottom: 5px; color: var(--muted); }
+  .stage[data-round="blind"] .who { color: var(--blue); }
+  .stage[data-round="adversarial"] .who { color: var(--rose); }
+  .turn .body { white-space: pre-wrap; color: var(--text); font-size: 14px; }
+  .turn.map .body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--muted); }
+
+  .final { margin-top: 26px; padding: 20px; border-radius: var(--radius);
+           background: linear-gradient(180deg, #10271f, #0c1a16);
+           border: 1px solid #1f6b4d; box-shadow: var(--shadow); animation: rise .4s both; }
+  .final .who { color: var(--emerald); font-weight: 700; font-size: 12px; letter-spacing: .05em; text-transform: uppercase; }
+  .final h3 { margin: 4px 0 8px; font-size: 16px; }
+  .final .body { white-space: pre-wrap; font-size: 14.5px; }
+  .tools { margin-top: 14px; display: flex; gap: 10px; }
+  .tool { all: unset; cursor: pointer; font-size: 12.5px; color: var(--muted); border: 1px solid var(--border); padding: 6px 11px; border-radius: 8px; }
+  .tool:hover { color: var(--text); border-color: var(--faint); }
+  .err { margin-top: 16px; padding: 14px; border-radius: 10px; background: #2a1416; border: 1px solid #6b2330; color: #ffb3bd; }
+  .footnote { color: var(--faint); font-size: 12px; margin-top: 28px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand"><span class="glyph">◑</span>Quorum</div>
+    <div class="tagline">watch a multi-model council deliberate</div>
+    <a class="ghlink" href="https://github.com/studyalwaysbro/quorum" target="_blank" rel="noopener">GitHub ↗</a>
+  </header>
+  <p class="lead">Not a vote. The models answer <b>blind</b>, <b>critique</b> each other, get distilled
+    into a <b>consensus map</b>, get <b>attacked</b> by a skeptic, then one <b>synthesizes</b> the final
+    call — and you watch every round arrive live.</p>
+
+  <div class="card composer">
+    <textarea id="q" placeholder="Ask the council something with real trade-offs…">Should a small team build on a monolith or microservices first?</textarea>
+    <div class="examples" id="examples"></div>
+
+    <div class="controls">
+      <span class="group-label">Mode</span>
+      <div class="toggle" id="mode">
+        <button data-mode="demo" class="active">Demo</button>
+        <button data-mode="live" id="liveBtn">Live models</button>
+      </div>
+
+      <span class="group-label">Council</span>
+      <div class="members" id="members"></div>
+
+      <button class="go" id="go">Deliberate</button>
+    </div>
+  </div>
+
+  <div id="results"></div>
+  <div id="final"></div>
+
+  <p class="footnote" id="foot">Demo mode uses keyless stub models so the mechanic runs instantly. Live mode drives any CLI models found on the host.</p>
+</div>
+
+<script>
+const EXAMPLES = [
+  "Should a small team build on a monolith or microservices first?",
+  "Is it worth rewriting a working but ugly codebase?",
+  "Best way to dedupe 50M records by a fuzzy key?",
+  "Hire a generalist or a specialist for the next role?",
+];
+const STAGE_META = {
+  blind:         { title: "Blind round",        sub: "each model answers independently — no peeking" },
+  critique:      { title: "Critique",           sub: "models see all answers (anonymized) and find agreement vs divergence" },
+  consensus_map: { title: "Consensus / issue map", sub: "what they agree on vs what's left unresolved" },
+  adversarial:   { title: "Adversarial",        sub: "the skeptic attacks the emerging consensus" },
+  synthesis:     { title: "Synthesis",          sub: "one model reads everything and writes the final answer" },
+};
+
+let MODE = "demo";
+let ROSTER = { demo: { members: [], all_members: [], skeptic: "Vex" }, live: [] };
+let selectedMembers = new Set();
+let skepticOn = true;
+let es = null;
+let lastTranscript = null;
+
+const $ = (id) => document.getElementById(id);
+
+function renderExamples() {
+  const box = $("examples"); box.innerHTML = "";
+  EXAMPLES.forEach(text => {
+    const c = document.createElement("span");
+    c.className = "chip"; c.textContent = text;
+    c.onclick = () => { $("q").value = text; };
+    box.appendChild(c);
+  });
+}
+
+function memberPool() {
+  return MODE === "live" ? ROSTER.live : ROSTER.demo.all_members;
+}
+
+function renderMembers() {
+  const box = $("members"); box.innerHTML = "";
+  const pool = memberPool();
+  pool.forEach(name => {
+    const chip = document.createElement("span");
+    chip.className = "mchip";
+    chip.textContent = name;
+    chip.dataset.on = selectedMembers.has(name) ? "1" : "0";
+    chip.onclick = () => {
+      if (selectedMembers.has(name)) selectedMembers.delete(name);
+      else selectedMembers.add(name);
+      chip.dataset.on = selectedMembers.has(name) ? "1" : "0";
+    };
+    box.appendChild(chip);
+  });
+  // skeptic chip
+  const skName = MODE === "live" ? (ROSTER.live.find(n => n === "grok") || ROSTER.skeptic_name) : ROSTER.demo.skeptic;
+  const sk = document.createElement("span");
+  sk.className = "mchip skeptic";
+  sk.textContent = "⚔ " + skName + " (skeptic)";
+  sk.dataset.on = skepticOn ? "1" : "0";
+  sk.dataset.name = skName;
+  sk.onclick = () => { skepticOn = !skepticOn; sk.dataset.on = skepticOn ? "1" : "0"; };
+  box.appendChild(sk);
+}
+
+function defaultSelection() {
+  selectedMembers = new Set((MODE === "live" ? ROSTER.live : ROSTER.demo.members).slice(0, 3));
+  if (MODE === "live" && selectedMembers.size === 0) skepticOn = false;
+}
+
+function setMode(m) {
+  MODE = m;
+  document.querySelectorAll("#mode button").forEach(b => b.classList.toggle("active", b.dataset.mode === m));
+  defaultSelection();
+  renderMembers();
+}
+
+async function loadRoster() {
+  try {
+    const r = await fetch("/api/roster"); ROSTER = await r.json();
+  } catch (e) { /* offline: keep demo defaults */ ROSTER.demo = { members: ["Atlas","Beacon","Cypher"], all_members: ["Atlas","Beacon","Cypher","Juno"], skeptic: "Vex" }; }
+  const liveBtn = $("liveBtn");
+  if (!ROSTER.live || ROSTER.live.length === 0) {
+    liveBtn.disabled = true;
+    liveBtn.title = "No CLI models detected on this host";
+  }
+  defaultSelection();
+  renderMembers();
+}
+
+function stageEl(round) {
+  let el = document.querySelector(`.stage[data-round="${round}"]`);
+  if (el) return el;
+  const meta = STAGE_META[round] || { title: round, sub: "" };
+  el = document.createElement("div");
+  el.className = "stage"; el.dataset.round = round;
+  el.innerHTML = `<div class="stage-head">
+      <span class="dot"></span>
+      <div><div class="stage-title">${meta.title}</div><div class="stage-sub">${meta.sub}</div></div>
+      <span class="status"></span>
+    </div><div class="turns"></div>`;
+  $("results").appendChild(el);
+  return el;
+}
+
+function setStatus(round, status) {
+  const el = stageEl(round);
+  const slot = el.querySelector(".status");
+  slot.innerHTML = status === "running" ? '<span class="spin"></span>'
+                 : status === "done" ? '<span class="check">✓</span>' : "";
+}
+
+function addTurn(round, model, response) {
+  const el = stageEl(round);
+  const turns = el.querySelector(".turns");
+  const t = document.createElement("div");
+  t.className = "turn" + (round === "consensus_map" ? " map" : "");
+  const who = document.createElement("div"); who.className = "who"; who.textContent = model;
+  const body = document.createElement("div"); body.className = "body"; body.textContent = response;
+  t.appendChild(who); t.appendChild(body);
+  turns.appendChild(t);
+  t.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function showFinal(answer, by) {
+  const f = $("final");
+  f.innerHTML = "";
+  const panel = document.createElement("div");
+  panel.className = "final card";
+  const who = document.createElement("div"); who.className = "who"; who.textContent = "Synthesis · " + by;
+  const h = document.createElement("h3"); h.textContent = "The council's answer";
+  const body = document.createElement("div"); body.className = "body"; body.textContent = answer;
+  const tools = document.createElement("div"); tools.className = "tools";
+  const dl = document.createElement("button"); dl.className = "tool"; dl.textContent = "⤓ Download transcript JSON";
+  dl.onclick = downloadTranscript;
+  tools.appendChild(dl);
+  panel.append(who, h, body, tools);
+  f.appendChild(panel);
+  f.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function showError(msg) {
+  const d = document.createElement("div"); d.className = "err"; d.textContent = "⚠ " + msg;
+  $("results").appendChild(d);
+}
+
+function downloadTranscript() {
+  if (!lastTranscript) return;
+  const blob = new Blob([JSON.stringify(lastTranscript, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "quorum-transcript.json";
+  a.click();
+}
+
+function deliberate() {
+  const question = $("q").value.trim();
+  if (!question) { $("q").focus(); return; }
+  const members = [...selectedMembers];
+  if (members.length === 0) { showResultsArea(); showError("Pick at least one council member."); return; }
+
+  if (es) es.close();
+  $("results").innerHTML = "";
+  $("final").innerHTML = "";
+  showResultsArea();
+  $("go").disabled = true;
+
+  const skName = document.querySelector(".mchip.skeptic")?.dataset.name || "";
+  const params = new URLSearchParams({
+    question, mode: MODE,
+    members: members.join(","),
+    skeptic: skepticOn ? skName : "",
+  });
+  es = new EventSource("/api/stream?" + params.toString());
+
+  es.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "round") setStatus(m.round, m.status);
+    else if (m.type === "turn") addTurn(m.round, m.model, m.response);
+    else if (m.type === "answer") showFinal(m.answer, m.by);
+    else if (m.type === "transcript") lastTranscript = m.transcript;
+    else if (m.type === "error") { showError(m.message); }
+    else if (m.type === "done") { es.close(); $("go").disabled = false; }
+  };
+  es.onerror = () => {
+    if (es && es.readyState === EventSource.CLOSED) { $("go").disabled = false; return; }
+    showError("Connection lost. Is the server running?");
+    es && es.close(); $("go").disabled = false;
+  };
+}
+
+function showResultsArea() { $("results").style.display = "block"; }
+
+document.querySelectorAll("#mode button").forEach(b => {
+  b.onclick = () => { if (!b.disabled) setMode(b.dataset.mode); };
+});
+$("go").onclick = deliberate;
+$("q").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") deliberate(); });
+
+renderExamples();
+loadRoster();
+</script>
+</body>
+</html>
