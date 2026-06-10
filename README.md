@@ -205,6 +205,19 @@ string into a string:
 
 Writing a new one is ~5 lines — see `quorum/adapters/base.py`.
 
+## CLI
+
+Install locally and use the same adapter shape from a shell:
+
+```bash
+quorum ask "We need to dedupe 50M records by a fuzzy key. What approach, and what breaks first at scale?" --member deepseek=deepseek --member gpt="codex --quiet" --member gemini="gemini -p" --synthesizer deepseek
+quorum ask "Is timsort right here?" --member a="python3 -c 'import sys; sys.stdin.read(); print(\"VERDICT: yes\\nCONFIDENCE: 4\")'" --labels yes,no --store quorum-votes.jsonl
+quorum health quorum-votes.jsonl --roster-size 2 --html reports/council_health.html
+```
+
+Add `--json transcript.json` or `--html transcript.html` to `quorum ask`, and
+use `quorum replay transcript.json` for an offline replay.
+
 ---
 
 ## Install & test
