@@ -61,10 +61,25 @@ class DemoModel:
             return self._synthesis(q)
         if "You are the adversary" in prompt:
             return self._adversarial(q)
+        if "consensus/issue map" in prompt.lower() or "Distill the critique" in prompt:
+            return self._consensus_map(q)
         if "Below are independent answers" in prompt:
             return self._critique(q)
         # default: the blind round ("You are answering independently")
         return self._blind(q)
+
+    def _consensus_map(self, q: str) -> str:
+        return (
+            "CONSENSUS / ISSUE MAP\n\n"
+            "CRITIQUE AGREEMENTS\n"
+            "- The framing matters more than the specific pick.\n"
+            "- The right answer depends on how badly being wrong scales.\n"
+            "- Favor options that stay cheap to reverse.\n\n"
+            "UNRESOLVED DIVERGENCES / OPEN ASSUMPTIONS\n"
+            f"- Risk appetite is genuinely split across the panel for “{q}”.\n"
+            "- Whether the inputs are stable enough to decide on at all.\n"
+            "- How much weight to give the worst-case vs the expected case."
+        )
 
     # -- per-round voices -------------------------------------------------
     def _blind(self, q: str) -> str:

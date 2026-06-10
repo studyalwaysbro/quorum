@@ -65,6 +65,12 @@ def _parser() -> argparse.ArgumentParser:
     replay.add_argument("transcript")
     replay.add_argument("--html")
     replay.set_defaults(func=_replay)
+
+    auth = sub.add_parser("auth", help="inspect model availability & health")
+    auth_sub = auth.add_subparsers(dest="auth_command", required=True)
+    doctor = auth_sub.add_parser("doctor", help="audition local-CLI models")
+    doctor.add_argument("--timeout", type=float, default=45)
+    doctor.set_defaults(func=_auth_doctor)
     return parser
 
 
@@ -129,6 +135,23 @@ def _replay(args, _model_factory) -> int:
         save(transcript_html(transcript), args.html)
     else:
         print(_plain_replay(transcript))
+    return 0
+
+
+def _auth_doctor(args, _model_factory) -> int:
+    from quorum.providers import LOCAL_CATALOG, probe
+
+    print("Local model audition (catalog + audition gate — same engine the UI uses):\n")
+    for spec in LOCAL_CATALOG:
+        if not spec.available:
+            print(f"  -  {spec.id:<10} not installed ({spec.binary} not on PATH)")
+            continue
+        result = probe(spec, timeout=args.timeout)
+        mark = "OK " if result.ok else "XX "
+        lat = f"  [{result.latency_s}s]" if result.latency_s is not None else ""
+        flag = " (agentic)" if spec.agentic else ""
+        print(f"  {mark}{spec.id:<10} {result.reason}{lat}{flag}")
+    print("\nXX = quarantined; not offered to a council until it passes.")
     return 0
 
 

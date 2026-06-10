@@ -1,4 +1,26 @@
+# --- secrets: never commit anything that could carry a key ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+secrets*
+.secrets/
+*.credentials
+*credentials*.json
+*secret*.json
+.quorum/
+# OS keychain / local config dirs are kept OUTSIDE the repo (~/.config/quorum)
+
+# --- build / runtime artifacts ---
 reports/
 __pycache__/
+*.py[cod]
 *.egg-info/
+.pytest_cache/
 .venv/
+venv/
+build/
+dist/
+*.log

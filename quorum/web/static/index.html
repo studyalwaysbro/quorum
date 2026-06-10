@@ -159,7 +159,7 @@
       <span class="group-label">Mode</span>
       <div class="toggle" id="mode">
         <button data-mode="demo" class="active">Demo</button>
-        <button data-mode="live" id="liveBtn">Live models</button>
+        <button data-mode="local" id="liveBtn">Local CLIs</button>
       </div>
 
       <span class="group-label">Council</span>
@@ -172,7 +172,7 @@
   <div id="results"></div>
   <div id="final"></div>
 
-  <p class="footnote" id="foot">Demo mode uses keyless stub models so the mechanic runs instantly. Live mode drives any CLI models found on the host.</p>
+  <p class="footnote" id="foot">Demo mode uses keyless stub models so the mechanic runs instantly. Local mode drives your installed, allowlisted CLIs — run <code>quorum auth doctor</code> to see which are healthy. No keys, prompts, or transcripts ever leave your machine.</p>
 </div>
 
 <script>
@@ -191,7 +191,7 @@ const STAGE_META = {
 };
 
 let MODE = "demo";
-let ROSTER = { demo: { members: [], all_members: [], skeptic: "Vex" }, live: [] };
+let ROSTER = { demo: { members: [], all_members: [], skeptic: "Vex" }, local: [], localInfo: {}, skeptic_name: "Vex" };
 let selectedMembers = new Set();
 let skepticOn = true;
 let es = null;
@@ -210,7 +210,7 @@ function renderExamples() {
 }
 
 function memberPool() {
-  return MODE === "live" ? ROSTER.live : ROSTER.demo.all_members;
+  return MODE === "local" ? ROSTER.local : ROSTER.demo.all_members;
 }
 
 function renderMembers() {
@@ -229,7 +229,9 @@ function renderMembers() {
     box.appendChild(chip);
   });
   // skeptic chip
-  const skName = MODE === "live" ? (ROSTER.live.find(n => n === "grok") || ROSTER.skeptic_name) : ROSTER.demo.skeptic;
+  const skName = MODE === "local"
+    ? (ROSTER.local.find(n => !selectedMembers.has(n)) || ROSTER.local[0] || "")
+    : ROSTER.demo.skeptic;
   const sk = document.createElement("span");
   sk.className = "mchip skeptic";
   sk.textContent = "⚔ " + skName + " (skeptic)";
@@ -240,8 +242,13 @@ function renderMembers() {
 }
 
 function defaultSelection() {
-  selectedMembers = new Set((MODE === "live" ? ROSTER.live : ROSTER.demo.members).slice(0, 3));
-  if (MODE === "live" && selectedMembers.size === 0) skepticOn = false;
+  if (MODE === "local") {
+    selectedMembers = new Set(ROSTER.local.slice(0, 3));
+    skepticOn = false;   // local skeptic off by default (avoid surprise auth errors)
+  } else {
+    selectedMembers = new Set(ROSTER.demo.members.slice(0, 3));
+    skepticOn = true;
+  }
 }
 
 function setMode(m) {
@@ -253,12 +260,20 @@ function setMode(m) {
 
 async function loadRoster() {
   try {
-    const r = await fetch("/api/roster"); ROSTER = await r.json();
-  } catch (e) { /* offline: keep demo defaults */ ROSTER.demo = { members: ["Atlas","Beacon","Cypher"], all_members: ["Atlas","Beacon","Cypher","Juno"], skeptic: "Vex" }; }
+    const caps = await fetch("/api/capabilities").then(r => r.json());
+    ROSTER.demo = caps.demo;
+    ROSTER.skeptic_name = caps.skeptic_name;
+    const avail = (caps.local || []).filter(m => m.available);
+    ROSTER.local = avail.map(m => m.id);
+    ROSTER.localInfo = Object.fromEntries(avail.map(m => [m.id, m]));
+  } catch (e) {
+    ROSTER.demo = { members: ["Atlas","Beacon","Cypher"], all_members: ["Atlas","Beacon","Cypher","Juno"], skeptic: "Vex" };
+    ROSTER.local = [];
+  }
   const liveBtn = $("liveBtn");
-  if (!ROSTER.live || ROSTER.live.length === 0) {
+  if (!ROSTER.local || ROSTER.local.length === 0) {
     liveBtn.disabled = true;
-    liveBtn.title = "No CLI models detected on this host";
+    liveBtn.title = "No allowlisted CLIs detected on this host";
   }
   defaultSelection();
   renderMembers();
@@ -329,7 +344,7 @@ function downloadTranscript() {
   a.click();
 }
 
-function deliberate() {
+async function deliberate() {
   const question = $("q").value.trim();
   if (!question) { $("q").focus(); return; }
   const members = [...selectedMembers];
@@ -342,13 +357,31 @@ function deliberate() {
   $("go").disabled = true;
 
   const skName = document.querySelector(".mchip.skeptic")?.dataset.name || "";
-  const params = new URLSearchParams({
-    question, mode: MODE,
-    members: members.join(","),
-    skeptic: skepticOn ? skName : "",
-  });
-  es = new EventSource("/api/stream?" + params.toString());
 
+  // POST creates the run (no prompt in the URL); the SSE stream is read back
+  // from an unguessable, one-shot run_id.
+  let runId;
+  try {
+    const resp = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Quorum-CSRF": "1" },
+      body: JSON.stringify({
+        question, mode: MODE, members,
+        skeptic: skepticOn && skName ? skName : null,
+      }),
+    });
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      throw new Error(e.detail || ("HTTP " + resp.status));
+    }
+    runId = (await resp.json()).run_id;
+  } catch (err) {
+    showError("Could not start run: " + err.message);
+    $("go").disabled = false;
+    return;
+  }
+
+  es = new EventSource("/api/runs/" + encodeURIComponent(runId) + "/events");
   es.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === "round") setStatus(m.round, m.status);

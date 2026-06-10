@@ -209,16 +209,17 @@ def consensus_map_round(
     # Deterministic and conservative by design: this stays replayable with
     # EchoModel/offline runs and only treats verbatim repeated critique claims
     # as agreement, rather than asking another model to invent consensus.
+    _CAP = 8   # keep the map readable; the model distiller is the real path
     agreements = [
         (claim_texts[key], sorted(models))
         for key, models in claim_models.items()
         if len(models) > 1
-    ]
+    ][:_CAP]
     unresolved = [
         (claim_texts[key], sorted(models))
         for key, models in claim_models.items()
         if len(models) == 1
-    ]
+    ][:_CAP]
 
     lines = [
         "CONSENSUS / ISSUE MAP",
