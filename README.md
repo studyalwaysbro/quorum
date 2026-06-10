@@ -163,6 +163,33 @@ without much new signal. `n_effective` turns average pairwise kappa into an
 independent-voter estimate, so a five-member council might only be worth 2.3
 independent voters.
 
+## Construct your council
+
+`dawid_skene()` estimates member confusion matrices from stored votes,
+`build_roster()` greedily trades off truth accuracy against clone-like kappa,
+and `drop_one()` shows whether removing a member helps or hurts majority-vote
+accuracy.
+
+```python
+ds = dawid_skene(records); roster = build_roster(records, ["alice", "bob", "carol"], size=2)
+print(ds.skill, roster.picks, drop_one(records, roster.picks))
+```
+
+If no truth labels exist, `build_roster()` falls back to Dawid-Skene skill.
+That is useful for bootstrapping, but weaker than supervised accuracy because
+it is learned from the same votes it is ranking.
+
+## Reports
+
+`transcript_html()` renders the deliberation replay, while
+`council_health_html()` renders the architecture dashboard with agreement,
+redundancy, Dawid-Skene skill, drop-one deltas, and a generated discussion.
+
+```python
+save(council_health_html(records, roster=roster), "reports/health.html")
+save(transcript_html(verdict.transcript, verdict=verdict), "reports/transcript.html")
+```
+
 ---
 
 ## Bring your own models
