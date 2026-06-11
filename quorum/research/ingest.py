@@ -27,14 +27,19 @@ ALLOWED_EXTENSIONS = {".txt", ".md", ".markdown", ".text"}
 
 # Binary / archive / document magic. We do NOT trust extension or Content-Type;
 # we sniff the bytes and reject anything that isn't plain text.
+_BOM = b"\xef\xbb\xbf"
 _BINARY_MAGIC = (
     b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08",      # zip / docx / jar / apk
     b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00", b"7z\xbc\xaf\x27\x1c", b"Rar!",
     b"%PDF-", b"\x7fELF", b"MZ", b"\xd0\xcf\x11\xe0",  # pdf / elf / pe / ole
     b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"BM",        # images
-    b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa",               # java/mach-o
+    b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa",               # java / mach-o
+    b"\xff\xfe", b"\xfe\xff",                            # utf-16 BOMs (not utf-8 text)
+    b"{\\rtf",                                           # rtf
 )
-_HTML_MARKERS = ("<!doctype", "<html", "<head", "<body", "<script", "<iframe", "<svg", "<?xml")
+# Scanned anywhere in the first 2 KiB (so comment-/BOM-prefixed HTML is caught).
+_HTML_MARKERS = ("<!doctype", "<html", "<head", "<body", "<script",
+                 "<iframe", "<svg", "<?xml", "<!entity")
 
 
 def _sanitize_name(filename: str | None) -> str:
@@ -57,6 +62,8 @@ def read_upload(filename: str | None, data: bytes, max_bytes: int = MAX_FILE_BYT
         raise ValueError(f"unsupported file type {ext or '(none)'}; allowed: .txt, .md")
     if len(data) > max_bytes:
         raise ValueError(f"{name} too large ({len(data)} bytes > {max_bytes})")
+    if data.startswith(_BOM):
+        data = data[len(_BOM):]
     for sig in _BINARY_MAGIC:
         if data.startswith(sig):
             raise ValueError(f"{name}: looks like a binary/archive/document file, not text")
@@ -64,14 +71,18 @@ def read_upload(filename: str | None, data: bytes, max_bytes: int = MAX_FILE_BYT
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise ValueError(f"{name} is not valid UTF-8 text")
+    text = text.lstrip("﻿")
     if "\x00" in text:
         raise ValueError(f"{name} contains NUL bytes")
-    head = text[:2048].lstrip().lower()
-    if any(head.startswith(m) for m in _HTML_MARKERS):
-        raise ValueError(f"{name}: HTML/XML documents are not accepted (plain text/markdown only)")
+    # HTML/XML anywhere in the first 2 KiB (catches comment-/whitespace-prefixed)
+    head = text[:2048].lower()
+    if any(marker in head for marker in _HTML_MARKERS):
+        raise ValueError(f"{name}: HTML/XML/markup documents are not accepted (plain text/markdown only)")
+    # control-char ratio: Unicode 'Cc' (incl DEL 0x7f and C1 0x80–0x9f) except tab/newline/CR
     sample = text[:8192]
     if sample:
-        ctrl = sum(1 for ch in sample if ord(ch) < 9 or 13 < ord(ch) < 32)
+        ctrl = sum(1 for ch in sample
+                   if ch not in "\t\n\r" and unicodedata.category(ch) == "Cc")
         if ctrl / len(sample) > 0.02:
             raise ValueError(f"{name}: too many control characters (not plain text)")
     return name, text

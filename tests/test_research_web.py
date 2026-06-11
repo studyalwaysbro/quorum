@@ -88,6 +88,48 @@ def test_research_run_is_one_shot():
     assert client.get(f"/api/research-runs/{rid}/events").status_code == 404
 
 
+def test_research_is_demo_only_local_rejected():
+    # Codex finding #1: fail closed — no local model from an untrusted upload
+    r = client.post("/api/research-runs", headers=CSRF,
+                    data={"question": "q", "mode": "local"}, files=_txt())
+    assert r.status_code == 400
+    from quorum.web.server import _build_research_models
+    with pytest.raises(ValueError):
+        _build_research_models("local")
+
+
+def test_expired_research_run_is_not_consumable():
+    # Codex finding #2: TTL enforced on GET, not only on POST eviction
+    rid = client.post("/api/research-runs", headers=CSRF,
+                      data={"question": "q", "mode": "demo"}, files=_txt()).json()["run_id"]
+    from quorum.web.server import _RESEARCH_RUNS
+    _RESEARCH_RUNS[rid]["expires_at"] = 0
+    assert client.get(f"/api/research-runs/{rid}/events").status_code == 404
+
+
+def test_oversize_file_rejected():
+    # Codex finding #3: per-file cap (bounded read or parser) rejects 600 KiB
+    big = b"a" * (600 * 1024)
+    r = client.post("/api/research-runs", headers=CSRF,
+                    data={"question": "q", "mode": "demo"},
+                    files={"files": ("big.txt", big, "text/plain")})
+    assert r.status_code in (400, 413)
+
+
+def test_sniffing_catches_bom_comment_html_and_rtf():
+    # Codex finding #4
+    for payload in (
+        b"\xef\xbb\xbf<!doctype html><b>x</b>",          # BOM-prefixed HTML
+        b"<!-- hi -->\n<html><script>x</script></html>", # comment-prefixed HTML
+        b"{\\rtf1 some rtf content}",                     # RTF
+        b"plain\x7f\x80\x81\x82 lots of controls",        # DEL + C1 controls
+    ):
+        r = client.post("/api/research-runs", headers=CSRF,
+                        data={"question": "q", "mode": "demo"},
+                        files={"files": ("a.txt", payload, "text/plain")})
+        assert r.status_code == 400, payload[:20]
+
+
 def test_research_bans_agentic_local_models():
     from quorum.providers import LOCAL_CATALOG
     from quorum.web.server import _build_research_models

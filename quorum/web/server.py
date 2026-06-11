@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -356,6 +357,9 @@ _QUESTION_CHAR_CAP = 2_000
 from quorum.research.ingest import MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES  # noqa: E402
 
 
+_research_claim_lock = threading.Lock()
+
+
 def _evict_expired_research(now: float) -> None:
     for rid in [r for r, v in _RESEARCH_RUNS.items() if v["expires_at"] < now]:
         _RESEARCH_RUNS.pop(rid, None)
@@ -363,6 +367,23 @@ def _evict_expired_research(now: float) -> None:
 
 def _stored_source_chars() -> int:
     return sum(v["source_chars"] for v in _RESEARCH_RUNS.values())
+
+
+async def _read_capped(upload, per_file_cap: int, remaining_total: int) -> bytes:
+    """Read an UploadFile in bounded chunks, rejecting BEFORE buffering past the
+    per-file or remaining-total cap. Starlette's ``max_part_size`` does not bound
+    file parts in all versions, so we enforce it here."""
+    buf = bytearray()
+    while True:
+        chunk = await upload.read(65536)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > per_file_cap:
+            raise HTTPException(status_code=413, detail=f"a file exceeds {per_file_cap} bytes")
+        if len(buf) > remaining_total:
+            raise HTTPException(status_code=413, detail="upload exceeds the total size cap")
+    return bytes(buf)
 
 
 @app.post("/api/research-runs")
@@ -377,7 +398,8 @@ async def create_research_run(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="bad Content-Length")
     if declared > MAX_TOTAL_BYTES + 64 * 1024:         # body cap + form overhead
         raise HTTPException(status_code=413, detail="upload too large")
-    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+    media = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media != "multipart/form-data":
         raise HTTPException(status_code=415, detail="expected multipart/form-data")
 
     now = time.monotonic()
@@ -391,14 +413,24 @@ async def create_research_run(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="a question is required")
     if len(question) > _QUESTION_CHAR_CAP:
         raise HTTPException(status_code=400, detail="question too long")
-    mode = str(form.get("mode", "demo"))
-    if mode not in ("demo", "local"):
-        raise HTTPException(status_code=400, detail="mode must be 'demo' or 'local'")
+    # Demo-only for now: running local CLIs over UNTRUSTED uploads isn't sandboxed
+    # (a hostile document could prompt-inject a tool-running agent). Deliberation
+    # mode still uses local models; research uploads do not.
+    if str(form.get("mode", "demo")) != "demo":
+        raise HTTPException(
+            status_code=400,
+            detail="research mode is demo-only for now (local execution over untrusted uploads is not yet sandboxed)",
+        )
+    mode = "demo"
 
     files = []
+    remaining = MAX_TOTAL_BYTES
     for value in form.getlist("files"):
-        if hasattr(value, "read"):                     # an UploadFile
-            files.append((value.filename, await value.read()))
+        if not hasattr(value, "read"):                 # ignore non-file form fields
+            continue
+        data = await _read_capped(value, MAX_FILE_BYTES, remaining)
+        remaining -= len(data)
+        files.append((value.filename, data))
     if not files:
         raise HTTPException(status_code=400, detail="upload at least one .txt or .md file")
 
@@ -422,10 +454,13 @@ async def create_research_run(request: Request) -> dict:
 
 @app.get("/api/research-runs/{run_id}/events")
 def research_run_events(run_id: str) -> StreamingResponse:
-    spec = _RESEARCH_RUNS.get(run_id)
-    if spec is None or spec["claimed"]:
-        raise HTTPException(status_code=404, detail="unknown or already-consumed run")
-    spec["claimed"] = True
+    now = time.monotonic()
+    with _research_claim_lock:                          # atomic claim, no GET race
+        _evict_expired_research(now)
+        spec = _RESEARCH_RUNS.get(run_id)
+        if spec is None or spec["claimed"] or spec["expires_at"] < now:
+            raise HTTPException(status_code=404, detail="unknown, expired, or already-consumed run")
+        spec["claimed"] = True
     return StreamingResponse(
         research_events(spec, run_id),
         media_type="text/event-stream",
@@ -434,15 +469,11 @@ def research_run_events(run_id: str) -> StreamingResponse:
 
 
 def _build_research_models(mode: str):
-    """Demo, or NON-AGENTIC local models only. Agentic CLIs are banned on this
-    endpoint — a hostile document must never reach a tool-running agent."""
-    if mode == "local":
-        ids = [s.id for s in LOCAL_CATALOG if s.available and not s.agentic]
-        if not ids:
-            raise ValueError("no non-agentic local models available; use demo mode")
-        members = [build_local_model(i) for i in ids[:3]]
-        skeptic = build_local_model(ids[-1]) if len(ids) > 1 else None
-        return members, skeptic
+    """DEMO ONLY (fail closed). Running local CLIs over untrusted uploads is not
+    yet sandboxed, and 'non-agentic + passes audition' does not prove a CLI is
+    tool/workspace-disabled — so a hostile document never reaches a local model."""
+    if mode != "demo":
+        raise ValueError("local research is disabled (uploads run demo models only)")
     members = [demo_research_member(n, i) for i, n in enumerate(["Atlas", "Beacon", "Cypher"])]
     return members, demo_research_member("Vex", 9)
 

@@ -3,6 +3,24 @@
 Quorum is designed so that **no secret can ever reach a place git, a browser, a
 URL, or a log file can see it.**
 
+## Trust model: Quorum is a LOCAL app
+
+The web UI binds `127.0.0.1` and gates state-changing POSTs with a custom
+`X-Quorum-CSRF` header + a localhost Origin check. That is a **local-application**
+trust model — it stops cross-origin browser CSRF, **not** an authenticated public
+service. **Do not expose the Quorum server to the internet** as-is; it has no user
+auth. Run it locally.
+
+## Research uploads are demo-only (for now)
+
+File uploads are treated as **hostile, untrusted content**. To keep that safe,
+research-mode uploads run **only the keyless demo models** — local CLIs are *not*
+used over uploaded documents, because a malicious file could otherwise prompt-
+inject a tool-capable agent. (Normal deliberation mode still uses your local
+models; the upload path does not.) Uploads are validated by content sniffing
+— not by extension or `Content-Type` — held in memory only, capped, and evicted
+on a TTL; nothing is written to disk.
+
 ## Key handling
 
 - **Local mode (default, zero keys).** Quorum drives your already-authenticated
