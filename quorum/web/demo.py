@@ -54,9 +54,12 @@ class DemoModel:
     lens: str = ""
     take: str = ""
     role: str = "member"   # "member" | "skeptic"
+    order: int = 0         # stable index, used to split the demo vote
 
     def complete(self, prompt: str) -> str:
         q = _short(_extract_question(prompt))
+        if "VERDICT:" in prompt and "CONFIDENCE:" in prompt:
+            return self._vote(prompt)
         if "You are the synthesizer" in prompt:
             return self._synthesis(q)
         if "You are the adversary" in prompt:
@@ -67,6 +70,16 @@ class DemoModel:
             return self._critique(q)
         # default: the blind round ("You are answering independently")
         return self._blind(q)
+
+    def _vote(self, prompt: str) -> str:
+        """Cast a categorical vote. Blind votes split by persona; on the revote
+        (after the adversary) everyone converges on the plurality — so the demo
+        scorecard shows agreement rising and a real flip."""
+        labels = _labels_from_prompt(prompt) or ["yes", "no"]
+        revote = "revise your categorical vote" in prompt
+        if revote:
+            return f"VERDICT: {labels[0]}\nCONFIDENCE: 4"
+        return f"VERDICT: {labels[self.order % len(labels)]}\nCONFIDENCE: 3"
 
     def _consensus_map(self, q: str) -> str:
         return (
@@ -131,9 +144,25 @@ def _extract_question(prompt: str) -> str:
     return prompt.strip()[:140]
 
 
+def _labels_from_prompt(prompt: str) -> list[str]:
+    """Pull the LABELS bullet list out of a vote prompt."""
+    if "LABELS:" not in prompt:
+        return []
+    block = prompt.split("LABELS:", 1)[1]
+    labels: list[str] = []
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            labels.append(stripped[2:].strip())
+        elif labels and not stripped:
+            break
+    return labels
+
+
 def demo_member(name: str) -> DemoModel:
     spec = PERSONAS.get(name) or {"lens": "general reasoning", "take": "weigh the trade-offs plainly"}
-    return DemoModel(name=name, lens=spec["lens"], take=spec["take"], role="member")
+    order = list(PERSONAS).index(name) if name in PERSONAS else (abs(hash(name)) % 7)
+    return DemoModel(name=name, lens=spec["lens"], take=spec["take"], role="member", order=order)
 
 
 def demo_skeptic(name: str = SKEPTIC_NAME) -> DemoModel:

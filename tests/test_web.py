@@ -170,6 +170,34 @@ def test_run_id_is_one_shot():
     assert second.status_code == 404
 
 
+def test_decision_mode_emits_scorecard_before_and_after():
+    body = {
+        "question": "Monolith or microservices?", "mode": "demo",
+        "members": ["Atlas", "Beacon", "Cypher"], "skeptic": "Vex",
+        "labels": ["monolith", "microservices"], "revote": True,
+    }
+    r = client.post("/api/runs", json=body, headers=CSRF)
+    assert r.status_code == 200, r.text
+    run_id = r.json()["run_id"]
+    ev = []
+    with client.stream("GET", f"/api/runs/{run_id}/events") as resp:
+        for line in resp.iter_lines():
+            if line.startswith("data: "):
+                ev.append(json.loads(line[len("data: "):]))
+
+    cards = [e for e in ev if e["type"] == "scorecard"]
+    assert {c["stage"] for c in cards} == {"blind", "final"}
+
+    final = next(c for c in cards if c["stage"] == "final")["delta"]
+    assert final["after"]["raw_agreement"] > final["before"]["raw_agreement"]
+    assert final["flips"], "the adversary should have moved at least one vote"
+    assert "descriptive" in final["note"]
+
+    # vote/revote turns must NOT appear as timeline cards
+    turn_rounds = {e["round"] for e in ev if e["type"] == "turn"}
+    assert "vote" not in turn_rounds and "revote" not in turn_rounds
+
+
 def test_no_key_value_leaks_into_a_demo_run():
     os.environ["ANTHROPIC_API_KEY"] = "sk-LEAKCANARY-123"
     try:

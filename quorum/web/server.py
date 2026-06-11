@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import secrets
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Iterator, Optional
 from urllib.parse import urlparse
@@ -36,7 +37,9 @@ from quorum.rounds import (
     critique_round,
     synthesis_round,
 )
+from quorum.scorecard import agreement_delta, delta_to_dict, stage_agreement
 from quorum.transcript import Transcript
+from quorum.votes import normalize_labels, revote_round, tally_votes, vote_round
 from quorum.web.demo import (
     SKEPTIC_NAME,
     default_demo_roster,
@@ -96,6 +99,8 @@ class RunRequest(BaseModel):
     members: list[str] = Field(default_factory=list)
     skeptic: Optional[str] = None
     allow_agentic: bool = False
+    labels: list[str] = Field(default_factory=list)   # decision mode → scorecard
+    revote: bool = True
 
 
 @app.post("/api/runs")
@@ -113,10 +118,18 @@ def create_run(req: RunRequest, request: Request) -> dict:
     if req.mode == "local":   # allowlist enforcement — no arbitrary PATH exec
         _validate_local_selection(members, req.skeptic, req.allow_agentic)
 
+    labels = None
+    if req.labels:
+        try:
+            labels = normalize_labels(req.labels)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"bad labels: {exc}")
+
     run_id = secrets.token_urlsafe(18)
     _RUNS[run_id] = {
         "question": req.question, "mode": req.mode,
         "members": members, "skeptic": req.skeptic,
+        "labels": labels, "revote": req.revote,
     }
     return {"run_id": run_id}
 
@@ -126,7 +139,10 @@ def run_events(run_id: str) -> StreamingResponse:
     spec = _RUNS.pop(run_id, None)     # one-shot: consume on read
     if spec is None:
         raise HTTPException(status_code=404, detail="unknown or already-consumed run")
-    gen = deliberation_events(spec["question"], spec["mode"], spec["members"], spec["skeptic"])
+    gen = deliberation_events(
+        spec["question"], spec["mode"], spec["members"], spec["skeptic"],
+        labels=spec.get("labels"), revote=spec.get("revote", True),
+    )
     return StreamingResponse(
         gen,
         media_type="text/event-stream",
@@ -213,20 +229,31 @@ def _sse(obj: dict) -> str:
 
 def deliberation_events(
     question: str, mode: str, members: list[str], skeptic_name: Optional[str],
+    labels: Optional[list[str]] = None, revote: bool = True,
 ) -> Iterator[str]:
-    """Drive the rounds in council order, emitting an SSE event per turn."""
+    """Drive the rounds in council order, emitting an SSE event per turn.
+
+    In decision mode (``labels`` set) the council also casts a categorical vote
+    after the blind round and a revote after the adversary; the agreement
+    scorecard is emitted as ``scorecard`` events. Vote turns drive the scorecard,
+    not the visible timeline.
+    """
     pace = 0.32 if mode == "demo" else 0.0
+    multi = len(members) > 1
+    decision = bool(labels) and multi
 
     member_models, skeptic = _build_models(mode, members, skeptic_name)
-    # A semantic distiller (the first member) replaces the verbatim-match
-    # consensus map, which explodes on real prose.
     distiller = member_models[0] if len(member_models) > 1 else None
     t = Transcript(question=question)
     seen = 0
+    blind_votes: dict = {}
+    blind_conf: dict = {}
 
     def flush_new():
         nonlocal seen
         for turn in t.turns[seen:]:
+            if turn.round in ("vote", "revote"):   # votes feed the scorecard, not cards
+                continue
             yield _sse({"type": "turn", "round": turn.round, "model": turn.model,
                         "response": turn.response})
             if pace:
@@ -234,7 +261,7 @@ def deliberation_events(
         seen = len(t.turns)
 
     stages = ["blind"]
-    if len(member_models) > 1:
+    if multi:
         stages += ["critique", "consensus_map"]
     if skeptic is not None:
         stages.append("adversarial")
@@ -242,15 +269,22 @@ def deliberation_events(
 
     yield _sse({"type": "start", "question": question, "mode": mode, "stages": stages,
                 "members": [m.name for m in member_models],
-                "skeptic": skeptic.name if skeptic else None})
+                "skeptic": skeptic.name if skeptic else None,
+                "decision": decision, "labels": list(labels) if labels else None})
 
     try:
         yield _sse({"type": "round", "round": "blind", "status": "running"})
         blind_round(member_models, question, t)
         yield from flush_new()
+        if decision:
+            vr = vote_round(member_models, question, labels, t)
+            blind_votes, blind_conf = vr.votes, vr.confidences
+            seen = len(t.turns)   # consume vote turns silently
+            yield _sse({"type": "scorecard", "stage": "blind",
+                        "snapshot": asdict(stage_agreement("blind", blind_votes, blind_conf, labels))})
         yield _sse({"type": "round", "round": "blind", "status": "done"})
 
-        if len(member_models) > 1:
+        if multi:
             yield _sse({"type": "round", "round": "critique", "status": "running"})
             critique_round(member_models, question, t)
             yield from flush_new()
@@ -266,6 +300,13 @@ def deliberation_events(
             adversarial_round(skeptic, question, t)
             yield from flush_new()
             yield _sse({"type": "round", "round": "adversarial", "status": "done"})
+
+        if decision and revote:
+            rv = revote_round(member_models, question, labels, t,
+                              blind_votes, blind_conf, tally_votes(blind_votes, labels))
+            seen = len(t.turns)
+            delta = agreement_delta(blind_votes, blind_conf, rv.votes, rv.confidences, labels)
+            yield _sse({"type": "scorecard", "stage": "final", "delta": delta_to_dict(delta)})
 
         yield _sse({"type": "round", "round": "synthesis", "status": "running"})
         synthesizer = member_models[0]

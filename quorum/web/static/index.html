@@ -138,6 +138,33 @@
   .tool:hover { color: var(--text); border-color: var(--faint); }
   .err { margin-top: 16px; padding: 14px; border-radius: 10px; background: #2a1416; border: 1px solid #6b2330; color: #ffb3bd; }
   .footnote { color: var(--faint); font-size: 12px; margin-top: 28px; }
+
+  /* decision-mode controls */
+  .decision { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+  .dcheck { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; user-select: none; }
+  .dcheck input { accent-color: var(--blue); width: 15px; height: 15px; }
+  .labels-in { flex: 1; min-width: 220px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; color: var(--text); font: inherit; font-size: 13px; outline: none; }
+  .labels-in:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #5aa9ff22; }
+  .labels-in:disabled { opacity: .4; }
+
+  /* agreement scorecard */
+  #scorecard { margin-top: 22px; }
+  .scorecard { padding: 18px 20px; border-radius: var(--radius); background: linear-gradient(180deg, #14202e, #0f1521); border: 1px solid #2a3b55; box-shadow: var(--shadow); animation: rise .4s both; }
+  .sc-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .sc-title { font-weight: 700; font-size: 12px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+  .sc-big { font-size: 26px; font-weight: 800; letter-spacing: -.5px; }
+  .sc-arrow { color: var(--faint); font-size: 20px; }
+  .sc-delta { font-size: 14px; font-weight: 700; padding: 2px 9px; border-radius: 999px; }
+  .sc-up { color: #07140f; background: var(--emerald); }
+  .sc-down { color: #240f12; background: var(--rose); }
+  .sc-flat { color: var(--muted); background: var(--panel-2); }
+  .sc-metrics { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); font-size: 13px; }
+  .sc-metrics b { color: var(--text); font-weight: 650; }
+  .sc-flips { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+  .sc-flip { font-size: 13px; color: var(--text); }
+  .sc-flip .who { color: var(--rose); font-weight: 700; }
+  .sc-note { margin-top: 12px; color: var(--faint); font-size: 11.5px; }
+  .sc-pending { color: var(--faint); font-size: 13px; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -167,8 +194,14 @@
 
       <button class="go" id="go">Deliberate</button>
     </div>
+
+    <div class="decision">
+      <label class="dcheck"><input type="checkbox" id="decisionOn" checked> <span>Decision mode — measure how the adversary moves agreement</span></label>
+      <input type="text" id="labels" class="labels-in" value="monolith, microservices" placeholder="comma-separated choices, e.g. yes, no" />
+    </div>
   </div>
 
+  <div id="scorecard"></div>
   <div id="results"></div>
   <div id="final"></div>
 
@@ -373,10 +406,15 @@ async function deliberate() {
   if (es) es.close();
   $("results").innerHTML = "";
   $("final").innerHTML = "";
+  $("scorecard").innerHTML = "";
   showResultsArea();
   $("go").disabled = true;
 
   const skName = document.querySelector(".mchip.skeptic")?.dataset.name || "";
+  const decisionOn = $("decisionOn").checked;
+  const labels = decisionOn
+    ? $("labels").value.split(",").map(s => s.trim()).filter(Boolean)
+    : [];
 
   // POST creates the run (no prompt in the URL); the SSE stream is read back
   // from an unguessable, one-shot run_id.
@@ -393,6 +431,7 @@ async function deliberate() {
         question, mode: MODE, members,
         skeptic: selectedSkeptic,
         allow_agentic: allowAgentic,
+        labels, revote: true,
       }),
     });
     if (!resp.ok) {
@@ -411,6 +450,7 @@ async function deliberate() {
     const m = JSON.parse(ev.data);
     if (m.type === "round") setStatus(m.round, m.status);
     else if (m.type === "turn") addTurn(m.round, m.model, m.response);
+    else if (m.type === "scorecard") renderScorecard(m);
     else if (m.type === "answer") showFinal(m.answer, m.by);
     else if (m.type === "transcript") lastTranscript = m.transcript;
     else if (m.type === "error") { showError(m.message); }
@@ -425,10 +465,57 @@ async function deliberate() {
 
 function showResultsArea() { $("results").style.display = "block"; }
 
+function fmtAg(v) { return v == null ? "—" : v.toFixed(2); }
+function tallyStr(t) { return Object.entries(t).map(([k, v]) => `${k} ${v}`).join(" · "); }
+
+function renderScorecard(m) {
+  const box = $("scorecard");
+  if (m.stage === "blind") {
+    const s = m.snapshot;
+    box.innerHTML = `<div class="scorecard">
+      <div class="sc-head"><span class="sc-title">Agreement scorecard</span></div>
+      <div class="sc-metrics">
+        <span>blind agreement <b>${fmtAg(s.raw_agreement)}</b></span>
+        <span>tally <b>${tallyStr(s.tally)}</b></span>
+        <span>confidence <b>${s.mean_confidence ?? "—"}</b></span>
+      </div>
+      <div class="sc-pending">measuring how the adversary moves the council…</div>
+    </div>`;
+    return;
+  }
+  // stage === "final"
+  const d = m.delta, b = d.before, a = d.after;
+  const ch = d.raw_agreement_change;
+  const cls = ch == null ? "sc-flat" : ch > 0 ? "sc-up" : ch < 0 ? "sc-down" : "sc-flat";
+  const sign = ch != null && ch > 0 ? "+" : "";
+  const flips = Object.entries(d.flips || {});
+  const flipHtml = flips.length
+    ? flips.map(([who, [o, n]]) => `<div class="sc-flip"><span class="who">${who}</span> ${o ?? "—"} → ${n ?? "—"}</div>`).join("")
+    : `<div class="sc-flip" style="color:var(--faint)">no members changed their vote</div>`;
+  box.innerHTML = `<div class="scorecard">
+    <div class="sc-head">
+      <span class="sc-title">Adversary impact</span>
+      <span class="sc-big">${fmtAg(b.raw_agreement)}</span>
+      <span class="sc-arrow">→</span>
+      <span class="sc-big">${fmtAg(a ? a.raw_agreement : null)}</span>
+      ${ch == null ? "" : `<span class="sc-delta ${cls}">${sign}${ch.toFixed(2)} agreement</span>`}
+    </div>
+    <div class="sc-metrics">
+      <span>tally <b>${tallyStr(b.tally)}</b> → <b>${a ? tallyStr(a.tally) : "—"}</b></span>
+      <span>confidence <b>${b.mean_confidence ?? "—"} → ${a ? (a.mean_confidence ?? "—") : "—"}</b></span>
+      <span>flips <b>${flips.length}</b></span>
+    </div>
+    <div class="sc-flips">${flipHtml}</div>
+    <div class="sc-note">${d.note}</div>
+  </div>`;
+  box.querySelector(".scorecard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 document.querySelectorAll("#mode button").forEach(b => {
   b.onclick = () => { if (!b.disabled) setMode(b.dataset.mode); };
 });
 $("go").onclick = deliberate;
+$("decisionOn").addEventListener("change", () => { $("labels").disabled = !$("decisionOn").checked; });
 $("q").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") deliberate(); });
 
 renderExamples();
