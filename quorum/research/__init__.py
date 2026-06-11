@@ -16,6 +16,9 @@ from quorum.research.schema import (
 )
 from quorum.research.ingest import chunk_text
 from quorum.research.retrieval import WholeContextRetriever
+from quorum.research.rounds import fact_check, grounded_blind
+from quorum.research.ledger import ClaimLedger, disposition_for
+from quorum.research.pipeline import ResearchVerdict, run_research
 
 __all__ = [
     "SourceChunk",
@@ -25,4 +28,10 @@ __all__ = [
     "validate_citations",
     "chunk_text",
     "WholeContextRetriever",
+    "grounded_blind",
+    "fact_check",
+    "ClaimLedger",
+    "disposition_for",
+    "ResearchVerdict",
+    "run_research",
 ]

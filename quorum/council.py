@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from quorum.adapters import Model
 from quorum.personas import AdversaryPersona, get_persona
+from quorum.research.pipeline import ResearchVerdict, run_research
 from quorum.records import RecordStore, VoteRecord
 from quorum.rounds import (
     adversarial_round,
@@ -180,6 +181,14 @@ class Council:
             revote_confidences=revote_confidences,
             flips=flips,
             notes=notes,
+        )
+
+    def research(self, question: str, chunks) -> "ResearchVerdict":
+        """Source-grounded research: members answer with cited claims, then a
+        checker (the skeptic, else the first member) fact-checks each against the
+        source. Returns a Claim Ledger. Separate from :meth:`ask`."""
+        return run_research(
+            self.members, question, chunks, skeptic=self.skeptic,
         )
 
     def _notes(self) -> list[str]:
