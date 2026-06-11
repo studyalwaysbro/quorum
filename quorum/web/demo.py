@@ -57,16 +57,21 @@ class DemoModel:
     order: int = 0         # stable index, used to split the demo vote
 
     def complete(self, prompt: str) -> str:
+        # Route ONLY on the instruction prefix (everything before the QUESTION
+        # block), which is always server-authored. The QUESTION itself is
+        # user-controlled, so scanning it would let a crafted question
+        # impersonate a round marker and hijack the demo's reply.
+        instruction = prompt.split("QUESTION:\n", 1)[0]
         q = _short(_extract_question(prompt))
-        if "VERDICT:" in prompt and "CONFIDENCE:" in prompt:
+        if "categorical verdict" in instruction or "categorical vote" in instruction:
             return self._vote(prompt)
-        if "You are the synthesizer" in prompt:
+        if "You are the synthesizer" in instruction:
             return self._synthesis(q)
-        if "Attack specific claims and assumptions in the consensus" in prompt:
+        if "Attack specific claims and assumptions in the consensus" in instruction:
             return self._adversarial(q, prompt)
-        if "consensus/issue map" in prompt.lower() or "Distill the critique" in prompt:
+        if "Distill the critique" in instruction:
             return self._consensus_map(q)
-        if "Below are independent answers" in prompt:
+        if "Below are independent answers" in instruction:
             return self._critique(q)
         # default: the blind round ("You are answering independently")
         return self._blind(q)
@@ -76,8 +81,9 @@ class DemoModel:
         (after the adversary) everyone converges on the *actual* blind plurality
         (parsed from the tally in the revote prompt) — so the demo scorecard
         shows agreement rising and real flips."""
+        instruction = prompt.split("QUESTION:\n", 1)[0]
         labels = _labels_from_prompt(prompt) or ["yes", "no"]
-        if "revise your categorical vote" in prompt:
+        if "revise your categorical vote" in instruction:
             target = _plurality_from_tally(prompt, labels) or labels[0]
             return f"VERDICT: {target}\nCONFIDENCE: 4"
         return f"VERDICT: {labels[self.order % len(labels)]}\nCONFIDENCE: 3"
