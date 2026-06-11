@@ -71,6 +71,43 @@ def test_ledger_to_dict_exposes_refused_and_effective_verdict():
     assert all("effective_verdict" in c for c in d["claims"])
 
 
+def test_partially_supported_without_citation_is_also_dropped():
+    # Codex finding #1: PartiallySupported must NOT escape the guarantee
+    chunks = chunk_text(SOURCE)
+    v = run_research([_model("m1")], "q", chunks, skeptic=_model("c", verdict="PartiallySupported"))
+    led = v.ledger
+    # the fabricated-quote claim: checker said PartiallySupported, but no valid cite
+    bad = next(c for c in led.claims if "photosynth" in c.text.lower())
+    assert bad.has_valid_citation is False
+    assert bad.verdict == "PartiallySupported"
+    assert bad.effective_verdict == "Unsupported"
+    assert bad in led.dropped and bad not in led.qualified
+
+
+def test_verdict_parser_rejects_spoofed_and_nonfinal():
+    # Codex finding #2
+    assert _parse_verdict("VERDICT: SupportedButActuallyUnsupported") is None
+    assert _parse_verdict("explain\nVERDICT: Supported\nnot final") is None
+    assert _parse_verdict("VERDICT: Supported") == "Supported"
+    assert _parse_verdict("reasoning...\nVERDICT: Contradicted") == "Contradicted"
+    assert _parse_verdict("VERDICT: Supported.") == "Supported"   # trailing period ok
+
+
+def test_ledger_ids_match_transcript_metadata():
+    # Codex finding #3: pooled ids must equal grounded-meta ids
+    chunks = chunk_text(SOURCE)
+    a = _model("A", grounded='{"claims":[{"text":"a","citations":[{"chunk_id":"C1","quote":"Cats sleep 16 hours a day"}]}]}')
+    b = _model("B", grounded='{"claims":[{"text":"b","citations":[{"chunk_id":"C2","quote":"obligate carnivores"}]}]}')
+    v = run_research([a, b], "q", chunks, skeptic=_model("c"))
+    ledger_ids = {c.id for c in v.ledger.claims}
+    meta_ids = {
+        claim["id"]
+        for turn in v.transcript.turns if turn.round == "grounded_blind"
+        for claim in turn.meta["claims"]
+    }
+    assert ledger_ids == meta_ids == {"K1", "K2"}
+
+
 def test_council_research_method_runs_end_to_end():
     from quorum import Council
     chunks = chunk_text(SOURCE)

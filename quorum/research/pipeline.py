@@ -40,11 +40,9 @@ def run_research(
     t = Transcript(question=question)
     per_member = grounded_blind(members, question, chunks, t, retriever=retriever)
 
-    pooled = []
-    for member in members:                       # stable member order
-        for claim in per_member.get(member.name, []):
-            claim.id = f"K{len(pooled) + 1}"     # globally unique ledger ids
-            pooled.append(claim)
+    # grounded_blind already assigned global, stable ids (K1, K2, …) that match
+    # the transcript metadata; just pool them in member order.
+    pooled = [claim for member in members for claim in per_member.get(member.name, [])]
 
     checker = skeptic or members[0]
     for claim in pooled:

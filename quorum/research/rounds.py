@@ -79,11 +79,14 @@ def grounded_blind(
     packet = retriever.packet(chunks, question)
     prompt = _grounded_prompt(question, packet)
     out: dict[str, list[Claim]] = {}
+    counter = 1                                  # global, stable ids across members
     for member in members:
         response = member.complete(prompt)
         claims, final = _claims_with_repair(member, prompt, response)
         validate_citations(claims, chunks)
         for claim in claims:
+            claim.id = f"K{counter}"             # ledger id == transcript-meta id
+            counter += 1
             claim.asserted_by = [member.name]
         t.record("grounded_blind", member.name, prompt, final,
                  meta={"claims": [c.to_dict() for c in claims]})
@@ -103,18 +106,24 @@ def _fact_check_prompt(claim_text: str, source: str) -> str:
     )
 
 
-_VERDICT_RE = re.compile(
-    r"VERDICT\s*:\s*(Supported|PartiallySupported|Unsupported|Contradicted)",
+# The verdict must be the LAST non-empty line and an EXACT full-line match, so
+# 'VERDICT: SupportedButActuallyUnsupported' or a verdict buried mid-text can't
+# spoof it. Anything else fails closed (claim is treated as unverified).
+_VERDICT_LINE_RE = re.compile(
+    r"^VERDICT\s*:\s*(Supported|PartiallySupported|Unsupported|Contradicted)\.?$",
     re.IGNORECASE,
 )
 _CANON = {v.casefold(): v for v in VERDICTS}
 
 
 def _parse_verdict(text: str) -> Optional[str]:
-    matches = _VERDICT_RE.findall(text)
-    if not matches:
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    if not lines:
+        return None
+    match = _VERDICT_LINE_RE.match(lines[-1])
+    if match is None:
         return None                       # unparsed -> fail closed (drops the claim)
-    return _CANON[matches[-1].casefold()]
+    return _CANON[match.group(1).casefold()]
 
 
 def fact_check(

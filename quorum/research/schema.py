@@ -52,9 +52,10 @@ class Claim:
 
     @property
     def effective_verdict(self) -> Optional[str]:
-        """The enforced verdict: a claim can never be 'Supported' without a
-        valid citation, no matter what a model (or caller) claimed."""
-        if self.verdict == "Supported" and not self.has_valid_citation:
+        """The enforced verdict: a claim can never be reported as support-like
+        ('Supported' OR 'PartiallySupported') without a valid citation, no
+        matter what a model (or caller) claimed."""
+        if self.verdict in ("Supported", "PartiallySupported") and not self.has_valid_citation:
             return "Unsupported"
         return self.verdict
 
