@@ -146,6 +146,27 @@ placed in URLs. Download the full replayable transcript from the result panel.
 
 ---
 
+## Research mode — ground a council in your document
+
+Open the **📄 Research** tab, drop a `.txt`/`.md` file, and ask a question. The
+council reads the source, answers in **cited claims**, and an adversary
+**fact-checks each claim against the source**. The result is a **Claim Ledger**:
+
+- **Kept** — supported by a citation whose quote literally appears in the source
+- **Qualified** — partially supported
+- **What Quorum refused to conclude** — claims with no citation that checks out
+
+A citation is "valid" only if its quote is a verbatim substring of the cited
+chunk, checked deterministically — so a claim can **never** be reported as
+supported on a fabricated quote, no matter what the model (or the fact-checker)
+says. That auditable refusal to overclaim is the point.
+
+Uploads are treated as untrusted content: validated by sniffing (not extension),
+capped, held in memory only, and run with **demo models only** — see
+[`SECURITY.md`](SECURITY.md). Download the full ledger as JSON from the result.
+
+---
+
 ## Measure your council
 
 Pass labels to `ask()` when you want a measurable categorical decision:

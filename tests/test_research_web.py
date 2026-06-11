@@ -31,6 +31,15 @@ def _events(run_id):
     return ev
 
 
+def test_index_serves_research_ui():
+    html = client.get("/").text
+    assert 'id="research-view"' in html and 'id="dropzone"' in html
+    assert "/api/research-runs" in html and "renderLedger" in html
+    # the ledger UI renders the ENFORCED verdict, not the raw one (carry-forward)
+    assert "effective_verdict" in html
+    assert "refused_to_conclude" in html or "refused to conclude" in html.lower()
+
+
 def test_upload_happy_path_yields_ledger():
     r = client.post("/api/research-runs", headers=CSRF,
                     data={"question": "summarize the biology", "mode": "demo"}, files=_txt())

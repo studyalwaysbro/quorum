@@ -167,6 +167,50 @@
   .sc-flip .who { color: var(--rose); font-weight: 700; }
   .sc-note { margin-top: 12px; color: var(--faint); font-size: 11.5px; }
   .sc-pending { color: var(--faint); font-size: 13px; margin-top: 8px; }
+
+  /* tabs */
+  .tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border); }
+  .tab { all: unset; cursor: pointer; padding: 9px 16px; font-size: 14px; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab.active { color: var(--text); border-bottom-color: var(--blue); }
+  .tab:hover { color: var(--text); }
+
+  /* research upload */
+  .dropzone { border: 1.5px dashed var(--border); border-radius: 12px; padding: 26px; text-align: center; color: var(--muted); cursor: pointer; transition: .15s; background: var(--bg); outline: none; }
+  .dropzone:hover, .dropzone.drag, .dropzone:focus { border-color: var(--blue); background: #5aa9ff0c; color: var(--text); }
+  .dz-inner b { color: var(--text); }
+  .dz-link { color: var(--blue); text-decoration: underline; }
+  .dz-sub { color: var(--faint); font-size: 12px; }
+  .filelist { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 0; }
+  .filerow { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 7px 11px; }
+  .filerow .sz { color: var(--faint); margin-left: auto; }
+  .filerow .rm { cursor: pointer; color: var(--faint); padding: 0 4px; }
+  .filerow .rm:hover { color: var(--rose); }
+
+  /* claim ledger */
+  .ledger-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 26px 0 4px; }
+  .ledger-title { font-weight: 700; font-size: 16px; }
+  .ledger-counts { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
+  .pill.kept { color: #07140f; background: var(--emerald); }
+  .pill.qualified { color: #241a06; background: var(--amber); }
+  .pill.dropped { color: #240f12; background: var(--rose); }
+  .ledger-section { margin-top: 18px; }
+  .ledger-section h4 { font-size: 12px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+  .refused-note { color: var(--faint); font-size: 12px; margin: 0 0 8px; }
+  .claim { padding: 12px 14px; border-radius: 12px; background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--faint); margin: 8px 0; animation: rise .3s both; }
+  .claim.kept { border-left-color: var(--emerald); }
+  .claim.qualified { border-left-color: var(--amber); }
+  .claim.dropped { border-left-color: var(--rose); background: #ff6b730a; }
+  .claim .ctext { font-size: 14px; color: var(--text); }
+  .claim .cmeta { margin-top: 6px; font-size: 12px; color: var(--faint); display: flex; gap: 12px; flex-wrap: wrap; }
+  .claim .cmeta .vd.kept { color: var(--emerald); font-weight: 700; }
+  .claim .cmeta .vd.qualified { color: var(--amber); font-weight: 700; }
+  .claim .cmeta .vd.dropped { color: var(--rose); font-weight: 700; }
+  .cite { margin-top: 7px; font-size: 12px; line-height: 1.5; }
+  .cite .src { color: var(--violet); font-weight: 700; }
+  .cite .q { color: var(--muted); font-style: italic; }
+  .cite .ok { color: var(--emerald); }
+  .cite .bad { color: var(--rose); }
 </style>
 </head>
 <body>
@@ -180,6 +224,12 @@
     into a <b>consensus map</b>, get <b>attacked</b> by a skeptic, then one <b>synthesizes</b> the final
     call — and you watch every round arrive live.</p>
 
+  <div class="tabs">
+    <button class="tab active" data-view="council">⚖ Council</button>
+    <button class="tab" data-view="research">📄 Research</button>
+  </div>
+
+  <div id="council-view">
   <div class="card composer">
     <textarea id="q" placeholder="Ask the council something with real trade-offs…">Should a small team build on a monolith or microservices first?</textarea>
     <div class="examples" id="examples"></div>
@@ -209,6 +259,25 @@
   <div id="scorecard"></div>
   <div id="results"></div>
   <div id="final"></div>
+  </div><!-- /council-view -->
+
+  <div id="research-view" hidden>
+    <div class="card composer">
+      <div id="dropzone" class="dropzone" tabindex="0">
+        <input type="file" id="rfiles" accept=".txt,.md,.markdown,.text" multiple hidden>
+        <div class="dz-inner">Drop a <b>.txt</b> / <b>.md</b> file here, or <span class="dz-link">browse</span><br>
+          <span class="dz-sub">treated as untrusted source · stays on your machine · demo models</span></div>
+      </div>
+      <div id="filelist" class="filelist"></div>
+      <textarea id="rq" placeholder="What should the council investigate in this document?">What are the main claims, and which are actually supported by the source?</textarea>
+      <div class="controls">
+        <span class="group-label">Source-grounded council → adversarial fact-check → Claim Ledger</span>
+        <button class="go" id="rgo">Investigate</button>
+      </div>
+    </div>
+    <div id="rresults"></div>
+    <div id="ledger"></div>
+  </div>
 
   <p class="footnote" id="foot">Demo mode uses keyless stub models so the mechanic runs instantly. Local mode drives installed, allowlisted CLIs only after an audition gate; agentic CLIs require explicit opt-in. No keys, prompts, or transcripts ever leave your machine.</p>
 </div>
@@ -555,6 +624,174 @@ $("q").addEventListener("input", () => {
   if ($("labels").value.trim() === DEFAULT_LABELS_VALUE) $("labels").value = "";
 });
 $("q").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") deliberate(); });
+
+// ---------- tabs ----------
+document.querySelectorAll(".tab").forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.toggle("active", x === t));
+    const v = t.dataset.view;
+    $("council-view").hidden = v !== "council";
+    $("research-view").hidden = v !== "research";
+    document.querySelector(".tagline").textContent = v === "research"
+      ? "ground a council in your document — audit every claim"
+      : "watch a multi-model council deliberate";
+  };
+});
+
+// ---------- research upload ----------
+let researchFiles = [];
+let res = null;
+const ALLOWED_RESEARCH = [".txt", ".md", ".markdown", ".text"];
+const dz = $("dropzone"), rfiles = $("rfiles");
+dz.onclick = () => rfiles.click();
+dz.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); rfiles.click(); } };
+["dragenter", "dragover"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("drag"); }));
+["dragleave", "drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove("drag"); }));
+dz.addEventListener("drop", e => addResearchFiles(e.dataTransfer.files));
+rfiles.addEventListener("change", () => { addResearchFiles(rfiles.files); rfiles.value = ""; });
+
+function addResearchFiles(list) {
+  for (const f of list) {
+    if (!ALLOWED_RESEARCH.some(e => f.name.toLowerCase().endsWith(e))) {
+      showResearchError(`“${f.name}” isn’t a .txt or .md file`); continue;
+    }
+    if (researchFiles.length >= 4) { showResearchError("max 4 files"); break; }
+    researchFiles.push(f);
+  }
+  renderFiles();
+}
+function renderFiles() {
+  const box = $("filelist"); box.innerHTML = "";
+  researchFiles.forEach((f, i) => {
+    const row = document.createElement("div"); row.className = "filerow";
+    const nm = document.createElement("span"); nm.textContent = f.name;
+    const sz = document.createElement("span"); sz.className = "sz"; sz.textContent = (f.size / 1024).toFixed(1) + " KiB";
+    const rm = document.createElement("span"); rm.className = "rm"; rm.textContent = "✕";
+    rm.onclick = () => { researchFiles.splice(i, 1); renderFiles(); };
+    row.append(nm, sz, rm); box.appendChild(row);
+  });
+}
+function showResearchError(msg) {
+  const d = document.createElement("div"); d.className = "err"; d.textContent = "⚠ " + msg;
+  $("rresults").appendChild(d);
+}
+
+async function investigate() {
+  const question = $("rq").value.trim();
+  if (!question) { $("rq").focus(); return; }
+  if (!researchFiles.length) { showResearchError("add a .txt or .md file first"); return; }
+  if (res) res.close();
+  $("rresults").innerHTML = ""; $("ledger").innerHTML = "";
+  $("rgo").disabled = true;
+
+  const fd = new FormData();
+  fd.append("question", question);
+  fd.append("mode", "demo");
+  researchFiles.forEach(f => fd.append("files", f, f.name));
+
+  let runId;
+  try {
+    const resp = await fetch("/api/research-runs", { method: "POST", headers: { "X-Quorum-CSRF": "1" }, body: fd });
+    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.detail || ("HTTP " + resp.status)); }
+    runId = (await resp.json()).run_id;
+  } catch (err) { showResearchError("Could not start: " + err.message); $("rgo").disabled = false; return; }
+
+  res = new EventSource("/api/research-runs/" + encodeURIComponent(runId) + "/events");
+  res.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "round") setResearchStage(m.round, m.status);
+    else if (m.type === "claim") addStreamingClaim(m.claim);
+    else if (m.type === "verdict") markVerdict(m.claim_id, m.effective_verdict);
+    else if (m.type === "ledger") renderLedger(m.ledger);
+    else if (m.type === "error") showResearchError(m.message);
+    else if (m.type === "done") { res.close(); $("rgo").disabled = false; }
+  };
+  res.onerror = () => {
+    if (res && res.readyState === EventSource.CLOSED) { $("rgo").disabled = false; return; }
+    showResearchError("Connection lost."); res && res.close(); $("rgo").disabled = false;
+  };
+}
+$("rgo").onclick = investigate;
+
+function setResearchStage(round, status) {
+  const labels = { grounded_blind: "Reading the source & extracting cited claims",
+                   fact_check: "Fact-checking each claim against the source" };
+  let el = document.getElementById("rstage-" + round);
+  if (!el) {
+    el = document.createElement("div"); el.id = "rstage-" + round; el.className = "stage-head";
+    el.innerHTML = `<span class="dot"></span><div><div class="stage-title"></div></div><span class="status"></span>`;
+    el.querySelector(".stage-title").textContent = labels[round] || round;
+    $("rresults").appendChild(el);
+  }
+  el.querySelector(".status").innerHTML = status === "running" ? '<span class="spin"></span>'
+    : status === "done" ? '<span class="check">✓</span>' : "";
+}
+function addStreamingClaim(claim) {
+  let pool = document.getElementById("rclaims");
+  if (!pool) { pool = document.createElement("div"); pool.id = "rclaims"; $("rresults").appendChild(pool); }
+  const div = document.createElement("div"); div.className = "claim"; div.id = "rc-" + claim.id;
+  div.innerHTML = `<div class="ctext"></div><div class="cmeta"><span></span><span class="vd" id="vd-${esc(claim.id)}">checking…</span></div>`;
+  div.querySelector(".ctext").textContent = claim.text;
+  div.querySelector(".cmeta span").textContent = "by " + (claim.asserted_by || []).join(", ");
+  pool.appendChild(div);
+}
+function markVerdict(id, verdict) {
+  const el = document.getElementById("vd-" + id);
+  if (el) el.textContent = verdict || "unverified";
+}
+function claimCiteHtml(claim) {
+  if (!claim.citations || !claim.citations.length) return '<div class="cite bad">no citation</div>';
+  return claim.citations.map(c => {
+    const mark = c.valid ? '<span class="ok">✓ in source</span>' : '<span class="bad">✗ not in source</span>';
+    return `<div class="cite"><span class="src">${esc(c.chunk_id)}</span> <span class="q">“${esc(c.quote)}”</span> ${mark}</div>`;
+  }).join("");
+}
+function claimCard(claim, disposition) {
+  const div = document.createElement("div"); div.className = "claim " + disposition;
+  div.innerHTML = `<div class="ctext"></div>
+    <div class="cmeta"><span></span><span class="vd ${disposition}">${esc(claim.effective_verdict || "unverified")}</span></div>
+    ${claimCiteHtml(claim)}`;
+  div.querySelector(".ctext").textContent = claim.text;
+  div.querySelector(".cmeta span").textContent = "asserted by " + (claim.asserted_by || []).join(", ");
+  return div;
+}
+let lastLedger = null;
+function renderLedger(ledger) {
+  lastLedger = ledger;
+  $("rresults").innerHTML = "";
+  const box = $("ledger"); box.innerHTML = "";
+  const c = ledger.counts;
+  const head = document.createElement("div"); head.className = "ledger-head";
+  head.innerHTML = `<span class="ledger-title">Claim Ledger</span><span class="ledger-counts">
+    <span class="pill kept">${c.kept} kept</span><span class="pill qualified">${c.qualified} qualified</span>
+    <span class="pill dropped">${c.dropped} refused</span></span>`;
+  box.appendChild(head);
+  const groups = [
+    ["kept", "Kept — supported by the source", ledger.claims.filter(x => x.effective_verdict === "Supported")],
+    ["qualified", "Qualified — partially supported", ledger.claims.filter(x => x.effective_verdict === "PartiallySupported")],
+    ["dropped", "What Quorum refused to conclude", ledger.refused_to_conclude || []],
+  ];
+  for (const [disp, title, claims] of groups) {
+    if (!claims.length) continue;
+    const sec = document.createElement("div"); sec.className = "ledger-section";
+    const h = document.createElement("h4"); h.textContent = title; sec.appendChild(h);
+    if (disp === "dropped") {
+      const note = document.createElement("div"); note.className = "refused-note";
+      note.textContent = "Not backed by a citation that checks out against the source — so the council declines to assert them.";
+      sec.appendChild(note);
+    }
+    claims.forEach(cl => sec.appendChild(claimCard(cl, disp)));
+    box.appendChild(sec);
+  }
+  const tools = document.createElement("div"); tools.className = "tools";
+  const dl = document.createElement("button"); dl.className = "tool"; dl.textContent = "⤓ Download ledger JSON";
+  dl.onclick = () => {
+    const blob = new Blob([JSON.stringify(lastLedger, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "quorum-claim-ledger.json"; a.click();
+  };
+  tools.appendChild(dl); box.appendChild(tools);
+  head.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
 
 renderExamples();
 loadRoster();
