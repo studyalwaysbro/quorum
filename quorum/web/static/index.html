@@ -763,8 +763,8 @@ function renderLedger(ledger) {
   const c = ledger.counts;
   const head = document.createElement("div"); head.className = "ledger-head";
   head.innerHTML = `<span class="ledger-title">Claim Ledger</span><span class="ledger-counts">
-    <span class="pill kept">${c.kept} kept</span><span class="pill qualified">${c.qualified} qualified</span>
-    <span class="pill dropped">${c.dropped} refused</span></span>`;
+    <span class="pill kept">${Number(c.kept) || 0} kept</span><span class="pill qualified">${Number(c.qualified) || 0} qualified</span>
+    <span class="pill dropped">${Number(c.dropped) || 0} refused</span></span>`;
   box.appendChild(head);
   const groups = [
     ["kept", "Kept — supported by the source", ledger.claims.filter(x => x.effective_verdict === "Supported")],
