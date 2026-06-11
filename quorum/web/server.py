@@ -124,6 +124,12 @@ def create_run(req: RunRequest, request: Request) -> dict:
             labels = normalize_labels(req.labels)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"bad labels: {exc}")
+        for label in labels:   # defense in depth vs HTML injection into the scorecard
+            if len(label) > 40 or any(c in label for c in "<>"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="labels must be short and contain no angle brackets",
+                )
 
     run_id = secrets.token_urlsafe(18)
     _RUNS[run_id] = {

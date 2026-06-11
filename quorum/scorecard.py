@@ -18,8 +18,9 @@ from quorum.agreement import raw_agreement
 from quorum.votes import majority_label, normalize_labels, tally_votes
 
 SINGLE_ITEM_NOTE = (
-    "Single question: pairwise agreement is descriptive, not inferential κ — "
-    "true κ needs multiple items (e.g. issue-level voting across a frozen map)."
+    "One question is a single item, so chance-corrected agreement (Fleiss/Cohen κ) "
+    "isn't stable here — this is descriptive pairwise agreement among parsed votes. "
+    "Inferential κ needs many items (e.g. issue-level voting across a frozen map)."
 )
 
 
@@ -31,7 +32,8 @@ class StageAgreement:
     majority: Optional[str]
     raw_agreement: Optional[float]   # pairwise agreement among non-null votes
     mean_confidence: Optional[float]
-    n_voted: int
+    n_voted: int                     # members whose vote parsed
+    n_members: int                   # members asked to vote (denominator)
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ def stage_agreement(
         raw_agreement=(round(ra, 3) if ra is not None else None),
         mean_confidence=_mean_confidence(confidences),
         n_voted=sum(1 for v in votes.values() if v is not None),
+        n_members=len(votes),
     )
 
 

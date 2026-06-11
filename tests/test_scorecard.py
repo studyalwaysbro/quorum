@@ -12,6 +12,16 @@ def test_stage_agreement_descriptive_metrics():
     assert s.raw_agreement == round(1 / 3, 3)   # pairs: yy, yn, yn -> 1/3
     assert s.mean_confidence == 4.0
     assert s.n_voted == 3
+    assert s.n_members == 3
+
+
+def test_n_members_counts_denominator_including_abstentions():
+    # two of four members failed to parse a vote (None)
+    votes = {"a": "yes", "b": "yes", "c": None, "d": None}
+    s = stage_agreement("blind", votes, {"a": 4, "b": 4, "c": None, "d": None}, ["yes", "no"])
+    assert s.n_voted == 2
+    assert s.n_members == 4
+    assert s.raw_agreement == 1.0   # among the 2 parsed — denominator makes this honest
 
 
 def test_agreement_delta_tracks_flips_and_movement():

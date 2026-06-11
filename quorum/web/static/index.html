@@ -454,7 +454,7 @@ async function deliberate() {
     else if (m.type === "answer") showFinal(m.answer, m.by);
     else if (m.type === "transcript") lastTranscript = m.transcript;
     else if (m.type === "error") { showError(m.message); }
-    else if (m.type === "done") { es.close(); $("go").disabled = false; }
+    else if (m.type === "done") { finalizePendingScorecard(); es.close(); $("go").disabled = false; }
   };
   es.onerror = () => {
     if (es && es.readyState === EventSource.CLOSED) { $("go").disabled = false; return; }
@@ -466,20 +466,25 @@ async function deliberate() {
 function showResultsArea() { $("results").style.display = "block"; }
 
 function fmtAg(v) { return v == null ? "—" : v.toFixed(2); }
-function tallyStr(t) { return Object.entries(t).map(([k, v]) => `${k} ${v}`).join(" · "); }
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function tallyStr(t) { return Object.entries(t).map(([k, v]) => `${esc(k)} ${v}`).join(" · "); }
 
 function renderScorecard(m) {
   const box = $("scorecard");
   if (m.stage === "blind") {
     const s = m.snapshot;
-    box.innerHTML = `<div class="scorecard">
+    box.innerHTML = `<div class="scorecard" data-pending="1">
       <div class="sc-head"><span class="sc-title">Agreement scorecard</span></div>
       <div class="sc-metrics">
         <span>blind agreement <b>${fmtAg(s.raw_agreement)}</b></span>
         <span>tally <b>${tallyStr(s.tally)}</b></span>
+        <span>votes parsed <b>${s.n_voted}/${s.n_members}</b></span>
         <span>confidence <b>${s.mean_confidence ?? "—"}</b></span>
       </div>
-      <div class="sc-pending">measuring how the adversary moves the council…</div>
+      <div class="sc-pending">measuring how the debate + adversary move the council…</div>
     </div>`;
     return;
   }
@@ -490,11 +495,12 @@ function renderScorecard(m) {
   const sign = ch != null && ch > 0 ? "+" : "";
   const flips = Object.entries(d.flips || {});
   const flipHtml = flips.length
-    ? flips.map(([who, [o, n]]) => `<div class="sc-flip"><span class="who">${who}</span> ${o ?? "—"} → ${n ?? "—"}</div>`).join("")
+    ? flips.map(([who, [o, n]]) => `<div class="sc-flip"><span class="who">${esc(who)}</span> ${esc(o ?? "—")} → ${esc(n ?? "—")}</div>`).join("")
     : `<div class="sc-flip" style="color:var(--faint)">no members changed their vote</div>`;
+  const denom = a ? `${a.n_voted}/${a.n_members}` : "—";
   box.innerHTML = `<div class="scorecard">
     <div class="sc-head">
-      <span class="sc-title">Adversary impact</span>
+      <span class="sc-title">Deliberation impact (blind → after debate)</span>
       <span class="sc-big">${fmtAg(b.raw_agreement)}</span>
       <span class="sc-arrow">→</span>
       <span class="sc-big">${fmtAg(a ? a.raw_agreement : null)}</span>
@@ -503,12 +509,18 @@ function renderScorecard(m) {
     <div class="sc-metrics">
       <span>tally <b>${tallyStr(b.tally)}</b> → <b>${a ? tallyStr(a.tally) : "—"}</b></span>
       <span>confidence <b>${b.mean_confidence ?? "—"} → ${a ? (a.mean_confidence ?? "—") : "—"}</b></span>
+      <span>votes parsed <b>${denom}</b></span>
       <span>flips <b>${flips.length}</b></span>
     </div>
     <div class="sc-flips">${flipHtml}</div>
-    <div class="sc-note">${d.note}</div>
+    <div class="sc-note">${esc(d.note)} Agreement is computed among parsed votes only.</div>
   </div>`;
   box.querySelector(".scorecard").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function finalizePendingScorecard() {
+  const pending = $("scorecard").querySelector('.scorecard[data-pending="1"] .sc-pending');
+  if (pending) pending.textContent = "blind agreement only — no revote was run.";
 }
 
 document.querySelectorAll("#mode button").forEach(b => {
@@ -516,6 +528,12 @@ document.querySelectorAll("#mode button").forEach(b => {
 });
 $("go").onclick = deliberate;
 $("decisionOn").addEventListener("change", () => { $("labels").disabled = !$("decisionOn").checked; });
+// Clear the prefilled demo labels once the question is edited, so stale labels
+// (e.g. monolith/microservices) never apply to a different question.
+const DEFAULT_LABELS_VALUE = $("labels").value.trim();
+$("q").addEventListener("input", () => {
+  if ($("labels").value.trim() === DEFAULT_LABELS_VALUE) $("labels").value = "";
+});
 $("q").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") deliberate(); });
 
 renderExamples();

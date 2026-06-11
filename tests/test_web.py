@@ -198,6 +198,27 @@ def test_decision_mode_emits_scorecard_before_and_after():
     assert "vote" not in turn_rounds and "revote" not in turn_rounds
 
 
+def test_html_bearing_labels_are_rejected():
+    body = {
+        "question": "x", "mode": "demo", "members": ["Atlas", "Beacon"],
+        "labels": ["<img src=x onerror=alert(1)>", "safe"],
+    }
+    r = client.post("/api/runs", json=body, headers=CSRF)
+    assert r.status_code == 400
+    assert "angle bracket" in r.json()["detail"]
+
+
+def test_demo_revote_converges_on_actual_plurality():
+    from quorum.web.demo import _plurality_from_tally
+    prompt = (
+        "BLIND VOTE TALLY:\n- monolith: 2\n- microservices: 1\n\n"
+        "LABELS:\n- monolith\n- microservices\n"
+    )
+    assert _plurality_from_tally(prompt, ["monolith", "microservices"]) == "monolith"
+    tie = "BLIND VOTE TALLY:\n- a: 1\n- b: 1\n\n"
+    assert _plurality_from_tally(tie, ["a", "b"]) is None
+
+
 def test_no_key_value_leaks_into_a_demo_run():
     os.environ["ANTHROPIC_API_KEY"] = "sk-LEAKCANARY-123"
     try:

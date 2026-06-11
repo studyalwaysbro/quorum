@@ -73,12 +73,13 @@ class DemoModel:
 
     def _vote(self, prompt: str) -> str:
         """Cast a categorical vote. Blind votes split by persona; on the revote
-        (after the adversary) everyone converges on the plurality — so the demo
-        scorecard shows agreement rising and a real flip."""
+        (after the adversary) everyone converges on the *actual* blind plurality
+        (parsed from the tally in the revote prompt) — so the demo scorecard
+        shows agreement rising and real flips."""
         labels = _labels_from_prompt(prompt) or ["yes", "no"]
-        revote = "revise your categorical vote" in prompt
-        if revote:
-            return f"VERDICT: {labels[0]}\nCONFIDENCE: 4"
+        if "revise your categorical vote" in prompt:
+            target = _plurality_from_tally(prompt, labels) or labels[0]
+            return f"VERDICT: {target}\nCONFIDENCE: 4"
         return f"VERDICT: {labels[self.order % len(labels)]}\nCONFIDENCE: 3"
 
     def _consensus_map(self, q: str) -> str:
@@ -157,6 +158,32 @@ def _labels_from_prompt(prompt: str) -> list[str]:
         elif labels and not stripped:
             break
     return labels
+
+
+def _plurality_from_tally(prompt: str, labels: list[str]) -> str | None:
+    """Parse the 'BLIND VOTE TALLY:' block in a revote prompt and return the
+    label with the most votes (None on a tie or if absent)."""
+    if "BLIND VOTE TALLY:" not in prompt:
+        return None
+    block = prompt.split("BLIND VOTE TALLY:", 1)[1]
+    counts: dict[str, int] = {}
+    for line in block.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- ") or ":" not in stripped:
+            if counts and not stripped:
+                break
+            continue
+        label, _, count = stripped[2:].rpartition(":")
+        label = label.strip()
+        try:
+            counts[label] = int(count.strip())
+        except ValueError:
+            continue
+    if not counts:
+        return None
+    top = max(counts.values())
+    winners = [label for label, c in counts.items() if c == top]
+    return winners[0] if len(winners) == 1 else None
 
 
 def demo_member(name: str) -> DemoModel:
