@@ -101,14 +101,25 @@ class ClaimParseError(ValueError):
     """Raised when a model response is not a valid claim object."""
 
 
-def parse_claims(text: str, prefix: str = "K") -> list[Claim]:
+# Bounds on a single model's claim response (hostile-source defense in depth).
+MAX_RESPONSE_CHARS = 64 * 1024
+MAX_CLAIMS = 40
+MAX_CLAIM_CHARS = 1_000
+MAX_QUOTE_CHARS = 2_000
+
+
+def parse_claims(text: str, prefix: str = "K", max_claims: int = MAX_CLAIMS) -> list[Claim]:
     """Parse a model's JSON claim response into Claim objects.
 
     Accepts ``{"claims": [...]}`` or a bare ``[...]``. Tolerates the JSON being
     wrapped in prose / code fences by extracting the first JSON array/object.
     Each claim needs ``text`` and a list of ``citations`` with ``chunk_id`` +
-    ``quote``. Raises :class:`ClaimParseError` on anything unusable.
+    ``quote``. Bounded (response/claim/quote sizes, claim count) so a hostile
+    source can't blow up memory. Raises :class:`ClaimParseError` on anything
+    unusable.
     """
+    if len(text) > MAX_RESPONSE_CHARS:
+        text = text[:MAX_RESPONSE_CHARS]
     payload = _extract_json(text)
     if payload is None:
         raise ClaimParseError("no JSON found in response")
@@ -123,6 +134,8 @@ def parse_claims(text: str, prefix: str = "K") -> list[Claim]:
 
     claims: list[Claim] = []
     for i, raw in enumerate(raw_claims, start=1):
+        if len(claims) >= max_claims:
+            break
         if not isinstance(raw, dict):
             continue
         text_val = raw.get("text")
@@ -138,9 +151,12 @@ def parse_claims(text: str, prefix: str = "K") -> list[Claim]:
                 quote = c.get("quote")
                 if isinstance(chunk_id, str) and isinstance(quote, str) \
                         and chunk_id.strip() and quote.strip():
-                    citations.append(Citation(chunk_id=chunk_id.strip(), quote=quote.strip()))
+                    citations.append(Citation(
+                        chunk_id=chunk_id.strip()[:64],
+                        quote=quote.strip()[:MAX_QUOTE_CHARS],
+                    ))
         claims.append(Claim(
-            id=f"{prefix}{i}", text=text_val.strip(),
+            id=f"{prefix}{len(claims) + 1}", text=text_val.strip()[:MAX_CLAIM_CHARS],
             citations=citations, confidence=_safe_confidence(raw.get("confidence")),
         ))
     if not claims:

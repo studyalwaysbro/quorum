@@ -38,9 +38,13 @@ from quorum.rounds import (
     synthesis_round,
 )
 from quorum.personas import get_persona, persona_catalog
+from quorum.research.ingest import ingest_uploads
+from quorum.research.ledger import ClaimLedger
+from quorum.research.rounds import fact_check, grounded_blind
 from quorum.scorecard import agreement_delta, delta_to_dict, stage_agreement
 from quorum.transcript import Transcript
 from quorum.votes import normalize_labels, revote_round, tally_votes, vote_round
+from quorum.web.demo_research import demo_research_member
 from quorum.web.demo import (
     SKEPTIC_NAME,
     default_demo_roster,
@@ -336,3 +340,146 @@ def deliberation_events(
         yield _sse({"type": "done"})
     except Exception as exc:  # never 500 mid-stream
         yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+
+
+# ============================ research mode (uploads) ============================
+# A LOCAL-app surface: 127.0.0.1 + CSRF header is a local-app trust model, not
+# internet auth. The #1 risk is a hostile uploaded document prompt-injecting an
+# AGENTIC local CLI into reading files / running tools, so research runs use
+# demo or NON-AGENTIC local models only — agentic models are banned here.
+
+_RESEARCH_RUNS: dict[str, dict] = {}
+_RESEARCH_TTL = 600                  # seconds a pending run lives
+_MAX_PENDING_RESEARCH = 8
+_GLOBAL_SOURCE_CHAR_CAP = 600_000    # across all stored research runs
+_QUESTION_CHAR_CAP = 2_000
+from quorum.research.ingest import MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES  # noqa: E402
+
+
+def _evict_expired_research(now: float) -> None:
+    for rid in [r for r, v in _RESEARCH_RUNS.items() if v["expires_at"] < now]:
+        _RESEARCH_RUNS.pop(rid, None)
+
+
+def _stored_source_chars() -> int:
+    return sum(v["source_chars"] for v in _RESEARCH_RUNS.values())
+
+
+@app.post("/api/research-runs")
+async def create_research_run(request: Request) -> dict:
+    _require_local_post(request)                       # CSRF/Origin BEFORE parsing
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        raise HTTPException(status_code=411, detail="Content-Length required")
+    try:
+        declared = int(content_length)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="bad Content-Length")
+    if declared > MAX_TOTAL_BYTES + 64 * 1024:         # body cap + form overhead
+        raise HTTPException(status_code=413, detail="upload too large")
+    if not request.headers.get("content-type", "").startswith("multipart/form-data"):
+        raise HTTPException(status_code=415, detail="expected multipart/form-data")
+
+    now = time.monotonic()
+    _evict_expired_research(now)
+    if len(_RESEARCH_RUNS) >= _MAX_PENDING_RESEARCH:
+        raise HTTPException(status_code=429, detail="too many pending research runs; retry shortly")
+
+    form = await request.form(max_files=MAX_FILES, max_fields=8, max_part_size=MAX_FILE_BYTES)
+    question = str(form.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="a question is required")
+    if len(question) > _QUESTION_CHAR_CAP:
+        raise HTTPException(status_code=400, detail="question too long")
+    mode = str(form.get("mode", "demo"))
+    if mode not in ("demo", "local"):
+        raise HTTPException(status_code=400, detail="mode must be 'demo' or 'local'")
+
+    files = []
+    for value in form.getlist("files"):
+        if hasattr(value, "read"):                     # an UploadFile
+            files.append((value.filename, await value.read()))
+    if not files:
+        raise HTTPException(status_code=400, detail="upload at least one .txt or .md file")
+
+    try:
+        chunks = ingest_uploads(files)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    source_chars = sum(len(c.text) for c in chunks)
+    if _stored_source_chars() + source_chars > _GLOBAL_SOURCE_CHAR_CAP:
+        raise HTTPException(status_code=429, detail="server source memory busy; retry shortly")
+
+    run_id = secrets.token_urlsafe(18)
+    _RESEARCH_RUNS[run_id] = {
+        "question": question, "mode": mode, "chunks": chunks,
+        "source_chars": source_chars, "created_at": now,
+        "expires_at": now + _RESEARCH_TTL, "claimed": False,
+    }
+    return {"run_id": run_id, "chunks": len(chunks), "source_chars": source_chars}
+
+
+@app.get("/api/research-runs/{run_id}/events")
+def research_run_events(run_id: str) -> StreamingResponse:
+    spec = _RESEARCH_RUNS.get(run_id)
+    if spec is None or spec["claimed"]:
+        raise HTTPException(status_code=404, detail="unknown or already-consumed run")
+    spec["claimed"] = True
+    return StreamingResponse(
+        research_events(spec, run_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _build_research_models(mode: str):
+    """Demo, or NON-AGENTIC local models only. Agentic CLIs are banned on this
+    endpoint — a hostile document must never reach a tool-running agent."""
+    if mode == "local":
+        ids = [s.id for s in LOCAL_CATALOG if s.available and not s.agentic]
+        if not ids:
+            raise ValueError("no non-agentic local models available; use demo mode")
+        members = [build_local_model(i) for i in ids[:3]]
+        skeptic = build_local_model(ids[-1]) if len(ids) > 1 else None
+        return members, skeptic
+    members = [demo_research_member(n, i) for i, n in enumerate(["Atlas", "Beacon", "Cypher"])]
+    return members, demo_research_member("Vex", 9)
+
+
+def research_events(spec: dict, run_id: str):
+    try:
+        chunks, question, mode = spec["chunks"], spec["question"], spec["mode"]
+        pace = 0.25 if mode == "demo" else 0.0
+        members, skeptic = _build_research_models(mode)
+        t = Transcript(question=question)
+
+        yield _sse({"type": "start", "question": question, "mode": mode,
+                    "chunks": len(chunks), "source": chunks[0].source if chunks else ""})
+
+        yield _sse({"type": "round", "round": "grounded_blind", "status": "running"})
+        per_member = grounded_blind(members, question, chunks, t)
+        pooled = [c for m in members for c in per_member.get(m.name, [])]
+        for claim in pooled:
+            yield _sse({"type": "claim", "claim": claim.to_dict()})
+            if pace:
+                time.sleep(pace)
+        yield _sse({"type": "round", "round": "grounded_blind", "status": "done"})
+
+        checker = skeptic or members[0]
+        yield _sse({"type": "round", "round": "fact_check", "status": "running"})
+        for claim in pooled:
+            fact_check(checker, claim, chunks, t)
+            yield _sse({"type": "verdict", "claim_id": claim.id,
+                        "verdict": claim.verdict, "effective_verdict": claim.effective_verdict})
+            if pace:
+                time.sleep(pace)
+        yield _sse({"type": "round", "round": "fact_check", "status": "done"})
+
+        ledger = ClaimLedger(question, pooled).finalize()
+        yield _sse({"type": "ledger", "ledger": ledger.to_dict()})
+        yield _sse({"type": "done"})
+    except Exception as exc:
+        yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+    finally:
+        _RESEARCH_RUNS.pop(run_id, None)               # free memory + reservation
