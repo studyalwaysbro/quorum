@@ -211,6 +211,17 @@
   .cite .q { color: var(--muted); font-style: italic; }
   .cite .ok { color: var(--emerald); }
   .cite .bad { color: var(--rose); }
+
+  /* adversary impact trace */
+  .trace-btn { all: unset; cursor: pointer; font-size: 11.5px; color: var(--rose); margin-left: 8px; opacity: .85; }
+  .trace-btn:hover { opacity: 1; text-decoration: underline; }
+  .trace { margin: 4px 0 8px 10px; }
+  .trace-inner { border-left: 2px solid var(--rose); padding: 8px 0 8px 12px; animation: rise .25s both; }
+  .trace-lead { font-size: 12px; color: var(--rose); font-weight: 700; }
+  .trace-obj { white-space: pre-wrap; font-size: 12.5px; color: var(--text); margin-top: 4px; }
+  .trace-maph { font-size: 11.5px; color: var(--faint); margin-top: 8px; }
+  .trace-map { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .trace-caveat { font-size: 11px; color: var(--faint); margin-top: 8px; font-style: italic; }
 </style>
 </head>
 <body>
@@ -494,6 +505,8 @@ async function deliberate() {
   $("results").innerHTML = "";
   $("final").innerHTML = "";
   $("scorecard").innerHTML = "";
+  traceAdversary = null; traceMap = null;
+  tracePersona = $("persona").selectedOptions[0]?.textContent || "adversary";
   showResultsArea();
   $("go").disabled = true;
 
@@ -537,7 +550,11 @@ async function deliberate() {
   es.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === "round") setStatus(m.round, m.status);
-    else if (m.type === "turn") addTurn(m.round, m.model, m.response);
+    else if (m.type === "turn") {
+      addTurn(m.round, m.model, m.response);
+      if (m.round === "adversarial") traceAdversary = { model: m.model, text: m.response };
+      else if (m.round === "consensus_map") traceMap = m.response;
+    }
     else if (m.type === "scorecard") renderScorecard(m);
     else if (m.type === "answer") showFinal(m.answer, m.by);
     else if (m.type === "transcript") lastTranscript = m.transcript;
@@ -552,6 +569,30 @@ async function deliberate() {
 }
 
 function showResultsArea() { $("results").style.display = "block"; }
+
+// adversary impact trace: what the council faced before any vote flip
+let traceAdversary = null, traceMap = null, tracePersona = "adversary";
+
+function fillTrace(el) {
+  el.innerHTML = "";
+  const wrap = document.createElement("div"); wrap.className = "trace-inner";
+  const lead = document.createElement("div"); lead.className = "trace-lead";
+  lead.textContent = `Revised after seeing the ${tracePersona} adversary's objection:`;
+  const obj = document.createElement("div"); obj.className = "trace-obj";
+  obj.textContent = traceAdversary ? traceAdversary.text : "(objection unavailable)";
+  wrap.append(lead, obj);
+  if (traceMap) {
+    const mh = document.createElement("div"); mh.className = "trace-maph";
+    mh.textContent = "— which attacked this consensus / issue map:";
+    const mp = document.createElement("div"); mp.className = "trace-map";
+    mp.textContent = traceMap;
+    wrap.append(mh, mp);
+  }
+  const cav = document.createElement("div"); cav.className = "trace-caveat";
+  cav.textContent = "Shows what the member saw before revising — evidence of context, not proof of causation.";
+  wrap.appendChild(cav);
+  el.appendChild(wrap);
+}
 
 function fmtAg(v) { return v == null ? "—" : v.toFixed(2); }
 function esc(s) {
@@ -582,8 +623,12 @@ function renderScorecard(m) {
   const cls = ch == null ? "sc-flat" : ch > 0 ? "sc-up" : ch < 0 ? "sc-down" : "sc-flat";
   const sign = ch != null && ch > 0 ? "+" : "";
   const flips = Object.entries(d.flips || {});
+  const canTrace = !!traceAdversary;
   const flipHtml = flips.length
-    ? flips.map(([who, [o, n]]) => `<div class="sc-flip"><span class="who">${esc(who)}</span> ${esc(o ?? "—")} → ${esc(n ?? "—")}</div>`).join("")
+    ? flips.map(([who, [o, n]], i) =>
+        `<div class="sc-flip"><span class="who">${esc(who)}</span> ${esc(o ?? "—")} → ${esc(n ?? "—")}`
+        + (canTrace ? ` <button class="trace-btn" data-i="${i}">why? ▸</button>` : "")
+        + `</div><div class="trace" id="sctrace-${i}" hidden></div>`).join("")
     : `<div class="sc-flip" style="color:var(--faint)">no members changed their vote</div>`;
   const beforeDenom = `${b.n_voted}/${b.n_members}`;
   const afterDenom = a ? `${a.n_voted}/${a.n_members}` : "—";
@@ -604,6 +649,13 @@ function renderScorecard(m) {
     <div class="sc-flips">${flipHtml}</div>
     <div class="sc-note">${esc(d.note)} Agreement is computed among parsed votes only.</div>
   </div>`;
+  box.querySelectorAll(".trace-btn").forEach(btn => {
+    btn.onclick = () => {
+      const panel = document.getElementById("sctrace-" + btn.dataset.i);
+      if (panel.hidden) { fillTrace(panel); panel.hidden = false; btn.textContent = "why? ▾"; }
+      else { panel.hidden = true; btn.textContent = "why? ▸"; }
+    };
+  });
   box.querySelector(".scorecard").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 

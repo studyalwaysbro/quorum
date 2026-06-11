@@ -227,6 +227,12 @@ def test_crafted_question_cannot_hijack_demo_routing():
         assert "Objection" not in out and "VERDICT:" not in out
 
 
+def test_index_includes_impact_trace_ui():
+    html = client.get("/").text
+    assert "fillTrace" in html and "trace-btn" in html and "sctrace-" in html
+    assert "not proof of causation" in html.lower()   # honesty caveat is present
+
+
 def test_capabilities_includes_personas():
     r = client.get("/api/capabilities").json()
     ids = {p["id"] for p in r["personas"]}
