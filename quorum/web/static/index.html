@@ -196,7 +196,7 @@
     </div>
 
     <div class="decision">
-      <label class="dcheck"><input type="checkbox" id="decisionOn" checked> <span>Decision mode — measure how the adversary moves agreement</span></label>
+      <label class="dcheck"><input type="checkbox" id="decisionOn" checked> <span>Decision mode — measure blind vs post-debate agreement</span></label>
       <input type="text" id="labels" class="labels-in" value="monolith, microservices" placeholder="comma-separated choices, e.g. yes, no" />
     </div>
   </div>
@@ -237,7 +237,10 @@ function renderExamples() {
   EXAMPLES.forEach(text => {
     const c = document.createElement("span");
     c.className = "chip"; c.textContent = text;
-    c.onclick = () => { $("q").value = text; };
+    c.onclick = () => {
+      $("q").value = text;
+      $("q").dispatchEvent(new Event("input"));
+    };
     box.appendChild(c);
   });
 }
@@ -497,7 +500,8 @@ function renderScorecard(m) {
   const flipHtml = flips.length
     ? flips.map(([who, [o, n]]) => `<div class="sc-flip"><span class="who">${esc(who)}</span> ${esc(o ?? "—")} → ${esc(n ?? "—")}</div>`).join("")
     : `<div class="sc-flip" style="color:var(--faint)">no members changed their vote</div>`;
-  const denom = a ? `${a.n_voted}/${a.n_members}` : "—";
+  const beforeDenom = `${b.n_voted}/${b.n_members}`;
+  const afterDenom = a ? `${a.n_voted}/${a.n_members}` : "—";
   box.innerHTML = `<div class="scorecard">
     <div class="sc-head">
       <span class="sc-title">Deliberation impact (blind → after debate)</span>
@@ -509,7 +513,7 @@ function renderScorecard(m) {
     <div class="sc-metrics">
       <span>tally <b>${tallyStr(b.tally)}</b> → <b>${a ? tallyStr(a.tally) : "—"}</b></span>
       <span>confidence <b>${b.mean_confidence ?? "—"} → ${a ? (a.mean_confidence ?? "—") : "—"}</b></span>
-      <span>votes parsed <b>${denom}</b></span>
+      <span>votes parsed <b>${beforeDenom} → ${afterDenom}</b></span>
       <span>flips <b>${flips.length}</b></span>
     </div>
     <div class="sc-flips">${flipHtml}</div>

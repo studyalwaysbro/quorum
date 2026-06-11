@@ -46,6 +46,14 @@ def test_index_served():
     assert r.status_code == 200 and "Quorum" in r.text
 
 
+def test_scorecard_ui_honesty_guards_present():
+    html = client.get("/").text
+    assert "measure blind vs post-debate agreement" in html
+    assert "measure how the adversary moves agreement" not in html
+    assert "beforeDenom" in html and "afterDenom" in html
+    assert 'dispatchEvent(new Event("input"))' in html
+
+
 def test_capabilities_lists_models_no_keys():
     r = client.get("/api/capabilities").json()
     assert "Atlas" in r["demo"]["all_members"]
