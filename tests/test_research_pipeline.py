@@ -108,6 +108,19 @@ def test_ledger_ids_match_transcript_metadata():
     assert ledger_ids == meta_ids == {"K1", "K2"}
 
 
+def test_demo_research_models_yield_kept_and_refused():
+    from quorum.web.demo_research import demo_research_member
+    source = ("Photosynthesis converts light into chemical energy.\n\n"
+              "Mitochondria are the powerhouse of the cell.")
+    chunks = chunk_text(source)
+    members = [demo_research_member("Atlas", 0), demo_research_member("Beacon", 1)]
+    v = run_research(members, "summarize", chunks, skeptic=demo_research_member("Vex"))
+    led = v.ledger
+    assert led.kept and led.dropped
+    assert all(c.has_valid_citation for c in led.kept)
+    assert all(not c.has_valid_citation for c in led.dropped)
+
+
 def test_council_research_method_runs_end_to_end():
     from quorum import Council
     chunks = chunk_text(SOURCE)
