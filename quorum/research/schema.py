@@ -11,7 +11,9 @@ citation-shaped decoration.
 from __future__ import annotations
 
 import json
+import math
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
@@ -48,12 +50,26 @@ class Claim:
     def has_valid_citation(self) -> bool:
         return any(c.valid for c in self.citations)
 
+    @property
+    def effective_verdict(self) -> Optional[str]:
+        """The enforced verdict: a claim can never be 'Supported' without a
+        valid citation, no matter what a model (or caller) claimed."""
+        if self.verdict == "Supported" and not self.has_valid_citation:
+            return "Unsupported"
+        return self.verdict
+
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d["has_valid_citation"] = self.has_valid_citation
+        d["effective_verdict"] = self.effective_verdict
+        return d
 
 
 def _norm(text: str) -> str:
-    """Collapse whitespace so quote-matching tolerates re-wrapping."""
+    """Normalize for quote-matching: NFKC (folds accents/smart-punctuation
+    composition differences) + collapsed whitespace. Offsets returned by
+    :func:`validate_citations` are positions in this normalized text."""
+    text = unicodedata.normalize("NFKC", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -108,42 +124,63 @@ def parse_claims(text: str, prefix: str = "K") -> list[Claim]:
     for i, raw in enumerate(raw_claims, start=1):
         if not isinstance(raw, dict):
             continue
-        text_val = str(raw.get("text", "")).strip()
-        if not text_val:
-            continue
+        text_val = raw.get("text")
+        if not isinstance(text_val, str) or not text_val.strip():
+            continue                                  # require a real string, no coercion
         citations = []
-        for c in raw.get("citations", []) or []:
-            if not isinstance(c, dict):
-                continue
-            chunk_id = str(c.get("chunk_id", "")).strip()
-            quote = str(c.get("quote", "")).strip()
-            if chunk_id and quote:
-                citations.append(Citation(chunk_id=chunk_id, quote=quote))
-        confidence = raw.get("confidence")
-        confidence = int(confidence) if isinstance(confidence, (int, float)) else None
+        raw_cites = raw.get("citations")
+        if isinstance(raw_cites, list):               # non-list citations -> none (fail closed)
+            for c in raw_cites:
+                if not isinstance(c, dict):
+                    continue
+                chunk_id = c.get("chunk_id")
+                quote = c.get("quote")
+                if isinstance(chunk_id, str) and isinstance(quote, str) \
+                        and chunk_id.strip() and quote.strip():
+                    citations.append(Citation(chunk_id=chunk_id.strip(), quote=quote.strip()))
         claims.append(Claim(
-            id=f"{prefix}{i}", text=text_val,
-            citations=citations, confidence=confidence,
+            id=f"{prefix}{i}", text=text_val.strip(),
+            citations=citations, confidence=_safe_confidence(raw.get("confidence")),
         ))
     if not claims:
         raise ClaimParseError("no usable claims in response")
     return claims
 
 
+def _safe_confidence(value) -> Optional[int]:
+    """Accept only a finite 1–5; reject bools, inf/nan, out-of-range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or not (1 <= value <= 5):
+        return None
+    return int(value)
+
+
+_DECODER = json.JSONDecoder()
+
+
 def _extract_json(text: str) -> Optional[str]:
+    """Find the first substring that actually parses as a JSON object/array.
+
+    Prefers a fenced ```json block, then scans every ``{``/``[`` position and
+    tries ``raw_decode`` there — so stray brackets in surrounding prose can't
+    derail extraction the way a naive find/rfind does.
+    """
     text = text.strip()
-    # fenced ```json ... ``` block
     fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.DOTALL)
     if fence:
-        return fence.group(1).strip()
-    # outermost JSON value = whichever of {...} / [...] opens earliest
-    candidates = []
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        end = text.rfind(closer)
-        if start != -1 and end > start:
-            candidates.append((start, text[start:end + 1]))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda c: c[0])
-    return candidates[0][1]
+        found = _first_json_span(fence.group(1).strip())
+        if found is not None:
+            return found
+    return _first_json_span(text)
+
+
+def _first_json_span(text: str) -> Optional[str]:
+    for i, ch in enumerate(text):
+        if ch in "{[":
+            try:
+                _obj, end = _DECODER.raw_decode(text, i)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            return text[i:end]
+    return None

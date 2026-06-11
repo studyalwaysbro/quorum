@@ -85,3 +85,45 @@ def test_claim_without_valid_citation_cannot_be_supported():
     claims = [Claim(id="K1", text="x", citations=[Citation("C1", "not present here")])]
     validate_citations(claims, chunks)
     assert claims[0].has_valid_citation is False
+
+
+# ---- hardening (Codex audit of 7b18f59) --------------------------------
+def test_effective_verdict_demotes_uncited_supported():
+    c = Claim(id="K1", text="x", citations=[], verdict="Supported")
+    assert c.effective_verdict == "Unsupported"          # cannot be Supported uncited
+    assert c.to_dict()["effective_verdict"] == "Unsupported"
+    c2 = Claim(id="K2", text="y",
+               citations=[Citation("C1", "q", valid=True)], verdict="Supported")
+    assert c2.effective_verdict == "Supported"
+
+
+def test_parse_claims_survives_malformed_fields():
+    # citations not a list, non-finite confidence, null text — must not crash
+    bad = ('{"claims":['
+           '{"text":"ok","citations":123,"confidence":1e309},'
+           '{"text":null,"citations":[]},'
+           '{"text":"typed","citations":[{"chunk_id":{"x":1},"quote":["a"]}]}'
+           ']}')
+    claims = parse_claims(bad)
+    assert [c.text for c in claims] == ["ok", "typed"]   # null-text claim dropped
+    assert claims[0].confidence is None                  # 1e309 rejected
+    assert claims[0].citations == []                     # non-list citations -> none
+    assert claims[1].citations == []                     # typed chunk_id/quote skipped
+
+
+def test_parse_claims_ignores_stray_brackets_before_json():
+    text = 'Here is [not json] and then: {"claims":[{"text":"real","citations":[]}]} done'
+    assert parse_claims(text)[0].text == "real"
+
+
+def test_validate_unicode_normalizes():
+    chunks = [SourceChunk("C1", "I love café mornings", "d")]   # NFC é
+    claims = [Claim(id="K1", text="x", citations=[Citation("C1", "love café mornings")])]  # NFD é
+    validate_citations(claims, chunks)
+    assert claims[0].citations[0].valid is True
+
+
+def test_degenerate_long_input_is_windowed_not_one_chunk():
+    chunks = chunk_text("x" * 5000)   # no spaces or sentences
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 1800 for c in chunks)

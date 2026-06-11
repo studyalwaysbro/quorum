@@ -40,7 +40,9 @@ def chunk_text(text: str, source: str = "upload", max_total: int = MAX_TOTAL_CHA
 
 
 def _split_long(paragraph: str, target: int) -> list[str]:
-    """Split an over-long paragraph on sentence boundaries, packing to ~target."""
+    """Split an over-long paragraph: sentence-pack first, then hard-window any
+    piece with no usable boundaries so a degenerate input (e.g. one 200k-char
+    token) can't become a single giant chunk."""
     if len(paragraph) <= target:
         return [paragraph]
     sentences = re.split(r"(?<=[.!?])\s+", paragraph)
@@ -53,4 +55,11 @@ def _split_long(paragraph: str, target: int) -> list[str]:
             current = f"{current} {sentence}".strip()
     if current.strip():
         pieces.append(current.strip())
-    return pieces or [paragraph]
+
+    out: list[str] = []
+    for piece in pieces or [paragraph]:
+        if len(piece) <= target * 2:
+            out.append(piece)
+        else:                                   # no boundaries — deterministic windows
+            out.extend(piece[i:i + target] for i in range(0, len(piece), target))
+    return out
