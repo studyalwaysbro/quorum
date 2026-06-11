@@ -52,11 +52,12 @@ class Audition:
 
 def audit_output(model_id: str, output: str, latency_s: Optional[float] = None) -> Audition:
     """Pure classifier: grade a completion string. Easy to unit-test."""
-    sample = output.strip()[:200]
+    stripped = output.strip()
+    sample = stripped[:200]
     if output.startswith("[quorum CLIModel error"):
         return Audition(model_id, False, output.strip("[]"), latency_s, sample)
 
-    low = output.lower()
+    low = stripped.lower()
     for marker in AUTH_MARKERS:
         if marker in low:
             return Audition(model_id, False, "not authenticated (CLI wants sign-in)", latency_s, sample)
@@ -64,14 +65,15 @@ def audit_output(model_id: str, output: str, latency_s: Optional[float] = None) 
         if marker in low:
             return Audition(model_id, False, f"leaks local/agent context ({marker!r})", latency_s, sample)
 
-    if CANARY.lower() in low:
+    if stripped == CANARY:
         return Audition(model_id, True, "ok", latency_s, sample)
-    # Didn't echo the canary: tolerate brief, clean answers; reject ramblers.
+    if CANARY.lower() in low:
+        return Audition(model_id, False, "canary plus extra output", latency_s, sample)
     if len(sample) == 0:
         return Audition(model_id, False, "empty response", latency_s, sample)
     if len(output.strip()) > 400:
         return Audition(model_id, False, "verbose / not single-turn-compliant", latency_s, sample)
-    return Audition(model_id, True, "responded (did not echo canary, but clean)", latency_s, sample)
+    return Audition(model_id, False, "did not echo audition canary exactly", latency_s, sample)
 
 
 def probe(spec: LocalModelSpec, timeout: float = 45) -> Audition:

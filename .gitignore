@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+.envrc
+.direnv/
 *.key
 *.pem
 *.p12
@@ -11,6 +13,8 @@ secrets*
 *credentials*.json
 *secret*.json
 .quorum/
+*transcript*.json
+quorum-votes*.jsonl
 # OS keychain / local config dirs are kept OUTSIDE the repo (~/.config/quorum)
 
 # --- build / runtime artifacts ---

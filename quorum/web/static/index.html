@@ -172,7 +172,7 @@
   <div id="results"></div>
   <div id="final"></div>
 
-  <p class="footnote" id="foot">Demo mode uses keyless stub models so the mechanic runs instantly. Local mode drives your installed, allowlisted CLIs — run <code>quorum auth doctor</code> to see which are healthy. No keys, prompts, or transcripts ever leave your machine.</p>
+  <p class="footnote" id="foot">Demo mode uses keyless stub models so the mechanic runs instantly. Local mode drives installed, allowlisted CLIs only after an audition gate; agentic CLIs require explicit opt-in. No keys, prompts, or transcripts ever leave your machine.</p>
 </div>
 
 <script>
@@ -217,13 +217,18 @@ function renderMembers() {
   const box = $("members"); box.innerHTML = "";
   const pool = memberPool();
   pool.forEach(name => {
+    const info = MODE === "local" ? ROSTER.localInfo[name] : null;
     const chip = document.createElement("span");
     chip.className = "mchip";
-    chip.textContent = name;
+    chip.textContent = info && info.agentic ? name + " (agentic)" : name;
+    if (info) chip.title = info.note || "";
     chip.dataset.on = selectedMembers.has(name) ? "1" : "0";
     chip.onclick = () => {
       if (selectedMembers.has(name)) selectedMembers.delete(name);
-      else selectedMembers.add(name);
+      else {
+        if (info && info.agentic && !confirmAgentic(name)) return;
+        selectedMembers.add(name);
+      }
       chip.dataset.on = selectedMembers.has(name) ? "1" : "0";
     };
     box.appendChild(chip);
@@ -237,18 +242,33 @@ function renderMembers() {
   sk.textContent = "⚔ " + skName + " (skeptic)";
   sk.dataset.on = skepticOn ? "1" : "0";
   sk.dataset.name = skName;
-  sk.onclick = () => { skepticOn = !skepticOn; sk.dataset.on = skepticOn ? "1" : "0"; };
+  sk.onclick = () => {
+    if (!skepticOn && isAgentic(skName) && !confirmAgentic(skName)) return;
+    skepticOn = !skepticOn; sk.dataset.on = skepticOn ? "1" : "0";
+  };
   box.appendChild(sk);
 }
 
 function defaultSelection() {
   if (MODE === "local") {
-    selectedMembers = new Set(ROSTER.local.slice(0, 3));
+    const defaults = ROSTER.local.filter(n => {
+      const info = ROSTER.localInfo[n] || {};
+      return info.enabled_by_default && !info.agentic;
+    });
+    selectedMembers = new Set(defaults.slice(0, 3));
     skepticOn = false;   // local skeptic off by default (avoid surprise auth errors)
   } else {
     selectedMembers = new Set(ROSTER.demo.members.slice(0, 3));
     skepticOn = true;
   }
+}
+
+function isAgentic(name) {
+  return MODE === "local" && !!(ROSTER.localInfo[name] && ROSTER.localInfo[name].agentic);
+}
+
+function confirmAgentic(name) {
+  return window.confirm(name + " is marked agentic and may carry local tool/workspace context. Run it in this council?");
 }
 
 function setMode(m) {
@@ -362,12 +382,17 @@ async function deliberate() {
   // from an unguessable, one-shot run_id.
   let runId;
   try {
+    const selectedSkeptic = skepticOn && skName ? skName : null;
+    const allowAgentic = MODE === "local" && (
+      members.some(isAgentic) || (selectedSkeptic && isAgentic(selectedSkeptic))
+    );
     const resp = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Quorum-CSRF": "1" },
       body: JSON.stringify({
         question, mode: MODE, members,
-        skeptic: skepticOn && skName ? skName : null,
+        skeptic: selectedSkeptic,
+        allow_agentic: allowAgentic,
       }),
     });
     if (!resp.ok) {

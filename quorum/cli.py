@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import shlex
 import sys
 from pathlib import Path
@@ -168,6 +169,25 @@ def _model(spec: str, timeout: float, factory):
         raise ValueError(f"bad argv for {name}: {exc}") from exc
     if not argv:
         raise ValueError(f"{name} argv must be non-empty")
+    prompt_transport = _catalog_prompt_transport(argv)
+    return _call_model_factory(factory, name, argv, timeout, prompt_transport)
+
+
+def _catalog_prompt_transport(argv: list[str]) -> str:
+    from quorum.providers import LOCAL_CATALOG
+
+    for spec in LOCAL_CATALOG:
+        command = list(spec.command)
+        if argv[: len(command)] == command:
+            return spec.prompt_transport
+    return "stdin"
+
+
+def _call_model_factory(factory, name: str, argv: list[str], timeout: float, prompt_transport: str):
+    params = inspect.signature(factory).parameters
+    accepts_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if "prompt_transport" in params or accepts_kw:
+        return factory(name, argv, timeout, prompt_transport=prompt_transport)
     return factory(name, argv, timeout)
 
 

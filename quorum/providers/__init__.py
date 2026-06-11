@@ -1,8 +1,8 @@
 """Provider catalog + audition gate.
 
 Quorum only ever runs models from an explicit allowlist (:mod:`catalog`),
-never an arbitrary PATH binary, and every model is probed for clean,
-non-agentic behavior before it's offered (:mod:`audition`).
+never an arbitrary PATH binary, and every web-triggered local model run is
+probed for clean, single-turn behavior first (:mod:`audition`).
 """
 
 from quorum.providers.catalog import (

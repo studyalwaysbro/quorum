@@ -109,6 +109,22 @@ def test_cli_error_paths_return_2(tmp_path, capsys):
         assert capsys.readouterr().err.startswith("quorum:")
 
 
+def test_cli_uses_catalog_prompt_transport_for_known_arg_clis(capsys):
+    seen = {}
+
+    def factory(name, argv, timeout, prompt_transport="stdin"):
+        del argv, timeout
+        seen[name] = prompt_transport
+        return ScriptedModel(name)
+
+    assert cli.main(
+        ["ask", "q?", "--member", "gemini=gemini -p"],
+        model_factory=factory,
+    ) == 0
+    assert seen["gemini"] == "arg"
+    assert capsys.readouterr().out == "final from gemini\n"
+
+
 def test_real_cli_invocation_with_python_member(tmp_path):
     store = tmp_path / "votes.jsonl"
     script = """

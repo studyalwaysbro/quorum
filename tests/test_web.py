@@ -5,6 +5,7 @@ Skips cleanly if FastAPI isn't installed (it's an optional [web] extra).
 
 import json
 import os
+import sys
 
 import pytest
 
@@ -12,6 +13,9 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from quorum.providers import Audition  # noqa: E402
+from quorum.providers.catalog import LocalModelSpec  # noqa: E402
+from quorum.web import server  # noqa: E402
 from quorum.web.server import app  # noqa: E402
 
 client = TestClient(app)
@@ -49,6 +53,17 @@ def test_capabilities_lists_models_no_keys():
     assert {"claude", "gemini", "grok"} <= ids
     # never leak a key-shaped field
     assert "key" not in json.dumps(r).lower().replace("skeptic", "")
+
+
+def test_capabilities_get_never_probes_live_clis(monkeypatch):
+    def fail_probe(*_args, **_kw):
+        raise AssertionError("GET /api/capabilities must not spawn subprocess probes")
+
+    monkeypatch.setattr(server, "probe", fail_probe)
+    r = client.get("/api/capabilities?probe_live=true")
+    assert r.status_code == 200
+    blob = r.json()
+    assert all("ok" not in model and "reason" not in model for model in blob["local"])
 
 
 def test_full_protocol_and_synthesis():
@@ -99,6 +114,52 @@ def test_unknown_local_model_rejected_at_post():
     r = client.post("/api/runs", json={"question": "x", "mode": "local", "members": ["rm"]},
                     headers=CSRF)
     assert r.status_code == 400
+
+
+def test_local_run_rejects_agentic_model_without_opt_in(monkeypatch):
+    spec = LocalModelSpec(
+        id="agent", label="Agent", command=(sys.executable,),
+        prompt_transport="stdin", agentic=True, enabled_by_default=False,
+    )
+    monkeypatch.setattr(server, "get_spec", lambda _mid: spec)
+    r = client.post("/api/runs", json={"question": "x", "mode": "local", "members": ["agent"]},
+                    headers=CSRF)
+    assert r.status_code == 403
+
+
+def test_local_run_requires_passing_audition(monkeypatch):
+    spec = LocalModelSpec(
+        id="plain", label="Plain", command=(sys.executable,),
+        prompt_transport="stdin", agentic=False, enabled_by_default=True,
+    )
+    monkeypatch.setattr(server, "get_spec", lambda _mid: spec)
+    monkeypatch.setattr(
+        server,
+        "probe",
+        lambda *_args, **_kw: Audition("plain", False, "not authenticated at https://auth.x.ai/private"),
+    )
+    r = client.post("/api/runs", json={"question": "x", "mode": "local", "members": ["plain"]},
+                    headers=CSRF)
+    assert r.status_code == 400
+    assert "auth.x.ai" not in r.text
+
+
+def test_local_run_accepts_agentic_only_with_opt_in_and_passing_audition(monkeypatch):
+    spec = LocalModelSpec(
+        id="agent", label="Agent", command=(sys.executable,),
+        prompt_transport="stdin", agentic=True, enabled_by_default=False,
+    )
+    monkeypatch.setattr(server, "get_spec", lambda _mid: spec)
+    monkeypatch.setattr(server, "probe", lambda *_args, **_kw: Audition("agent", True, "ok"))
+    r = client.post(
+        "/api/runs",
+        json={"question": "x", "mode": "local", "members": ["agent"], "allow_agentic": True},
+        headers=CSRF,
+    )
+    assert r.status_code == 200
+    run_id = r.json()["run_id"]
+    assert run_id
+    server._RUNS.pop(run_id, None)
 
 
 def test_run_id_is_one_shot():

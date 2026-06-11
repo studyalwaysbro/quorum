@@ -134,13 +134,15 @@ python -m quorum.web          # then open http://127.0.0.1:8000
 
 - **Demo mode** needs no API keys — keyless, round-aware stub models so the whole
   mechanic runs instantly for anyone who clones the repo.
-- **Live mode** auto-detects CLI models on the host (`deepseek`, `gemini`,
-  `codex`, `grok`) and lets you pick which sit on the council and which is the
-  adversary.
+- **Local CLI mode** detects the allowlisted CLIs on the host (`claude`,
+  `gemini`, `grok`, `codex`, `deepseek`) and lets you pick which sit on the
+  council and which is the adversary. Each selected CLI must pass the audition
+  gate before it can run; agentic CLIs are off by default and require explicit
+  opt-in.
 
-The backend streams over Server-Sent Events (`GET /api/stream`); the deliberation
-is driven round by round so turns are pushed the moment they land. Download the
-full replayable transcript from the result panel.
+The backend creates a run with CSRF-protected `POST /api/runs` and then streams
+over Server-Sent Events from `GET /api/runs/{run_id}/events`; prompts are not
+placed in URLs. Download the full replayable transcript from the result panel.
 
 ---
 
@@ -222,7 +224,7 @@ string into a string:
 
 | Adapter | Use it for |
 |---|---|
-| `CLIModel(name, argv)` | command-line tools that read stdin (`deepseek`, `codex`, `gemini`, `ollama run …`) |
+| `CLIModel(name, argv)` | command-line tools that read stdin, or cataloged CLIs with explicit `prompt_transport` |
 | `CallableModel(name, fn)` | an HTTP client you've already written |
 | `EchoModel(name, reply)` | deterministic stub for tests / offline demos |
 
@@ -233,9 +235,10 @@ Writing a new one is ~5 lines — see `quorum/adapters/base.py`.
 Install locally and use the same adapter shape from a shell:
 
 ```bash
-quorum ask "We need to dedupe 50M records by a fuzzy key. What approach, and what breaks first at scale?" --member deepseek=deepseek --member gpt="codex --quiet" --member gemini="gemini -p" --synthesizer deepseek
+quorum ask "We need to dedupe 50M records by a fuzzy key. What approach, and what breaks first at scale?" --member deepseek=deepseek --member gpt-5.5="codex exec" --member gemini="gemini -p" --synthesizer deepseek
 quorum ask "Is timsort right here?" --member a="python3 -c 'import sys; sys.stdin.read(); print(\"VERDICT: yes\\nCONFIDENCE: 4\")'" --labels yes,no --store quorum-votes.jsonl
 quorum health quorum-votes.jsonl --roster-size 2 --html reports/council_health.html
+quorum auth doctor
 ```
 
 Add `--json transcript.json` or `--html transcript.html` to `quorum ask`, and

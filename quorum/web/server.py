@@ -24,10 +24,11 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from quorum.adapters import Model
-from quorum.providers import LOCAL_CATALOG, build_local_model, get_spec, probe
+from quorum.providers import LOCAL_CATALOG, Audition, build_local_model, get_spec, probe
+from quorum.providers.catalog import LocalModelSpec
 from quorum.rounds import (
     adversarial_round,
     blind_round,
@@ -45,6 +46,7 @@ from quorum.web.demo import (
 
 STATIC = Path(__file__).parent / "static"
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+LOCAL_PROBE_TIMEOUT = 45
 
 app = FastAPI(title="Quorum", description="Watch a multi-model council deliberate")
 
@@ -75,8 +77,8 @@ def index() -> FileResponse:
 
 
 @app.get("/api/capabilities")
-def capabilities(probe_live: bool = False) -> dict:
-    """Model metadata only — never a key. Set probe_live=1 to audition CLIs."""
+def capabilities() -> dict:
+    """Model metadata only — never a key and never a subprocess probe."""
     local = []
     for spec in LOCAL_CATALOG:
         entry = {
@@ -84,9 +86,6 @@ def capabilities(probe_live: bool = False) -> dict:
             "enabled_by_default": spec.enabled_by_default,
             "available": spec.available, "note": spec.note,
         }
-        if probe_live and spec.available:
-            a = probe(spec)
-            entry.update(ok=a.ok, reason=a.reason, latency_s=a.latency_s)
         local.append(entry)
     return {"demo": default_demo_roster(), "local": local, "skeptic_name": SKEPTIC_NAME}
 
@@ -94,8 +93,9 @@ def capabilities(probe_live: bool = False) -> dict:
 class RunRequest(BaseModel):
     question: str
     mode: str = "demo"                 # "demo" | "local"
-    members: list[str] = []
+    members: list[str] = Field(default_factory=list)
     skeptic: Optional[str] = None
+    allow_agentic: bool = False
 
 
 @app.post("/api/runs")
@@ -111,11 +111,7 @@ def create_run(req: RunRequest, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="pick at least one member")
 
     if req.mode == "local":   # allowlist enforcement — no arbitrary PATH exec
-        for mid in members + ([req.skeptic] if req.skeptic else []):
-            try:
-                get_spec(mid)
-            except KeyError:
-                raise HTTPException(status_code=400, detail=f"unknown local model: {mid}")
+        _validate_local_selection(members, req.skeptic, req.allow_agentic)
 
     run_id = secrets.token_urlsafe(18)
     _RUNS[run_id] = {
@@ -147,6 +143,68 @@ def _build_models(mode: str, member_ids: list[str], skeptic_id: Optional[str]):
     members = [demo_member(name) for name in member_ids]
     skeptic = demo_skeptic(skeptic_id) if skeptic_id else None
     return members, skeptic
+
+
+def _validate_local_selection(
+    member_ids: list[str], skeptic_id: Optional[str], allow_agentic: bool
+) -> None:
+    specs = _local_specs(member_ids, skeptic_id)
+    unavailable = [spec.id for spec in specs if not spec.available]
+    if unavailable:
+        raise HTTPException(
+            status_code=400,
+            detail=f"local model not installed: {', '.join(unavailable)}",
+        )
+
+    agentic = [spec.id for spec in specs if spec.agentic]
+    if agentic and not allow_agentic:
+        raise HTTPException(
+            status_code=403,
+            detail=f"agentic local model requires explicit opt-in: {', '.join(agentic)}",
+        )
+
+    for spec in specs:
+        audition = probe(spec, timeout=LOCAL_PROBE_TIMEOUT)
+        if not audition.ok:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"local model failed audition: {spec.id} "
+                    f"({_public_audition_reason(audition)})"
+                ),
+            )
+
+
+def _local_specs(member_ids: list[str], skeptic_id: Optional[str]) -> list[LocalModelSpec]:
+    ids = []
+    for model_id in member_ids + ([skeptic_id] if skeptic_id else []):
+        if model_id not in ids:
+            ids.append(model_id)
+
+    specs = []
+    for model_id in ids:
+        try:
+            specs.append(get_spec(model_id))
+        except KeyError:
+            raise HTTPException(status_code=400, detail=f"unknown local model: {model_id}")
+    return specs
+
+
+def _public_audition_reason(audition: Audition) -> str:
+    reason = audition.reason.lower()
+    if "authenticated" in reason or "sign-in" in reason:
+        return "not authenticated"
+    if "context" in reason:
+        return "leaks local or agent context"
+    if "canary" in reason:
+        return "did not pass canary"
+    if "empty" in reason:
+        return "empty response"
+    if "verbose" in reason or "single-turn" in reason:
+        return "not single-turn compliant"
+    if "not installed" in reason:
+        return "not installed"
+    return "probe failed"
 
 
 def _sse(obj: dict) -> str:

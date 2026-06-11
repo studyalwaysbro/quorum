@@ -41,28 +41,74 @@ class CallableModel:
         return self.fn(prompt)
 
 
-# Env-var names whose VALUES are likely secrets. We strip these before running
-# any local CLI subprocess so that keys configured for Quorum's API providers
-# can NEVER leak into a child process's environment. This is the subprocess
-# env-inheritance leak vector: without it, `os.environ` (including every
-# provider key) is handed to every CLI we spawn.
+# Env-var names whose VALUES are likely secrets. Child CLIs receive a minimal
+# allowlist, and this denylist is an extra guard against accidentally retaining
+# credential-bearing names inside that allowlist.
 _SECRET_ENV_RE = re.compile(
     r"(?i)(API[_-]?KEY|ACCESS[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|"
-    r"CREDENTIAL|PRIVATE[_-]?KEY|"
+    r"CREDENTIAL|PRIVATE[_-]?KEY|BEARER|COOKIE|SESSION|WEBHOOK|"
+    r"AUTH|NETRC|DSN|URI|URL|SOCK|"
     r"^(ANTHROPIC|OPENAI|GEMINI|GOOGLE_API|GOOGLE_GENAI|DEEPSEEK|XAI|GROK|"
     r"CLAUDE|MISTRAL|COHERE|PERPLEXITY|OPENROUTER|HF|HUGGINGFACE)_)"
 )
 
+_SAFE_ENV_NAMES = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "LC_ALL",
+        "TERM",
+        "COLORTERM",
+        "NO_COLOR",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
+        "FORCE_COLOR",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "USERPROFILE",
+        "SYSTEMROOT",
+        "WINDIR",
+        "COMSPEC",
+        "PATHEXT",
+    }
+)
+_SAFE_ENV_PREFIXES = ("LC_",)
+
 
 def scrubbed_env(base: dict | None = None) -> dict:
-    """Return a copy of the environment with secret-bearing vars removed.
+    """Return a minimal environment for local CLI subprocesses.
 
     Local CLIs authenticate via their own OAuth/config (e.g. ``~/.claude``),
-    not via Quorum-managed API keys — so removing key-like vars is safe for
-    them and closes the leak path.
+    not via Quorum-managed API keys. Passing only basic process variables
+    closes env-inheritance leaks from API keys, database URLs, package-index
+    credentials, SSH agents, and similar parent-process state.
     """
     source = os.environ if base is None else base
-    return {k: v for k, v in source.items() if not _SECRET_ENV_RE.search(k)}
+    return {
+        k: v
+        for k, v in source.items()
+        if _is_allowed_env_name(k) and not _SECRET_ENV_RE.search(k)
+    }
+
+
+def _is_allowed_env_name(name: str) -> bool:
+    return name in _SAFE_ENV_NAMES or any(
+        name.startswith(prefix) for prefix in _SAFE_ENV_PREFIXES
+    )
 
 
 @dataclass
