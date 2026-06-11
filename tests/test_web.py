@@ -206,6 +206,43 @@ def test_decision_mode_emits_scorecard_before_and_after():
     assert "vote" not in turn_rounds and "revote" not in turn_rounds
 
 
+def test_capabilities_includes_personas():
+    r = client.get("/api/capabilities").json()
+    ids = {p["id"] for p in r["personas"]}
+    assert {"red_team", "compliance", "devils_advocate"} <= ids
+
+
+def test_unknown_persona_rejected_at_post():
+    r = client.post(
+        "/api/runs",
+        json={"question": "x", "mode": "demo", "members": ["Atlas", "Beacon"], "persona": "bogus"},
+        headers=CSRF,
+    )
+    assert r.status_code == 400
+
+
+def test_persona_changes_the_demo_adversary():
+    def adversary_text(persona):
+        body = {
+            "question": "Monolith or microservices?", "mode": "demo",
+            "members": ["Atlas", "Beacon", "Cypher"], "skeptic": "Vex", "persona": persona,
+        }
+        rid = client.post("/api/runs", json=body, headers=CSRF).json()["run_id"]
+        ev = []
+        with client.stream("GET", f"/api/runs/{rid}/events") as resp:
+            for line in resp.iter_lines():
+                if line.startswith("data: "):
+                    ev.append(json.loads(line[len("data: "):]))
+        return next(e["response"] for e in ev
+                    if e["type"] == "turn" and e["round"] == "adversarial")
+
+    compliance = adversary_text("compliance")
+    devil = adversary_text("devils_advocate")
+    assert "Compliance objection" in compliance
+    assert "opposite side" in devil
+    assert compliance != devil
+
+
 def test_html_bearing_labels_are_rejected():
     body = {
         "question": "x", "mode": "demo", "members": ["Atlas", "Beacon"],

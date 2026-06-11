@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 from uuid import uuid4
 
 from quorum.adapters import Model
+from quorum.personas import AdversaryPersona, get_persona
 from quorum.records import RecordStore, VoteRecord
 from quorum.rounds import (
     adversarial_round,
@@ -65,6 +66,7 @@ class Council:
         max_workers: Optional[int] = None,
         seed: int = 0,
         store: RecordStore | None = None,
+        adversary_persona: "AdversaryPersona | str | None" = None,
     ) -> None:
         if not members:
             raise ValueError("a council needs at least one member")
@@ -80,6 +82,7 @@ class Council:
         self.max_workers = max_workers
         self.seed = seed
         self.store = store
+        self.adversary_persona = get_persona(adversary_persona) if skeptic else None
 
     def ask(
         self,
@@ -123,7 +126,10 @@ class Council:
             )
             consensus_map_round(question, t, distiller=self.distiller)
         if self.skeptic is not None:
-            adversarial_round(self.skeptic, question, t, seed=self.seed)
+            adversarial_round(
+                self.skeptic, question, t, seed=self.seed,
+                persona=self.adversary_persona,
+            )
         if normalized_labels is not None and revote:
             revote_result = revote_round(
                 self.members,

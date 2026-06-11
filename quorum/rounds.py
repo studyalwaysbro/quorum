@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Sequence
 
 from quorum.adapters import Model
+from quorum.personas import AdversaryPersona, get_persona
 from quorum.transcript import Transcript, Turn
 
 
@@ -268,8 +269,18 @@ def consensus_map_round(
     )
 
 
-def adversarial_round(skeptic: Model, question: str, t: Transcript, seed: int = 0) -> None:
-    """A dedicated skeptic tries to refute the consensus/issue map."""
+def adversarial_round(
+    skeptic: Model, question: str, t: Transcript, seed: int = 0,
+    persona: "AdversaryPersona | str | None" = None,
+) -> None:
+    """A dedicated skeptic tries to refute the consensus/issue map.
+
+    ``persona`` swaps the adversary's role instruction (red team, steelman,
+    devil's advocate, domain skeptic, compliance); the attack mechanics and the
+    honest-concession clause are constant. Defaults to the red-team persona,
+    preserving prior behavior.
+    """
+    persona = get_persona(persona)
     blind = t.by_round("blind")
     shuffled, permutation = _shuffled_turns(blind, seed, "adversarial", skeptic.name)
     pool = _answer_pool(shuffled)
@@ -278,12 +289,10 @@ def adversarial_round(skeptic: Model, question: str, t: Transcript, seed: int = 
     if not consensus:
         consensus = "No consensus/issue map was recorded; attack the answers directly."
     prompt = (
-        "You are the adversary. Your job is to REFUTE, not to help. Attack "
-        "specific claims and assumptions in the consensus/issue map below, "
-        "using the independent answers as evidence. Find the strongest "
-        "objection: a wrong assumption, a missed edge case, a failure mode. If "
-        "you genuinely cannot break it, say so explicitly and explain why it "
-        "survives.\n\n"
+        f"{persona.instruction}\n\n"
+        "Attack specific claims and assumptions in the consensus/issue map "
+        "below, using the independent answers as evidence. If you genuinely "
+        "cannot break it, say so explicitly and explain why it survives.\n\n"
         f"QUESTION:\n{question}\n\n"
         f"CONSENSUS / ISSUE MAP:\n{consensus}\n\n"
         f"INDEPENDENT ANSWERS:\n{pool}"
@@ -296,6 +305,7 @@ def adversarial_round(skeptic: Model, question: str, t: Transcript, seed: int = 
         meta={
             "answer_permutation": permutation,
             "answer_models": [turn.model for turn in shuffled],
+            "persona": persona.id,
         },
     )
 

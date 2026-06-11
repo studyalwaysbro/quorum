@@ -47,6 +47,7 @@ def _parser() -> argparse.ArgumentParser:
         "--truth",
         "--html",
         "--json",
+        "--persona",
     ):
         ask.add_argument(flag)
     for flag in ("--revote", "--quiet"):
@@ -90,6 +91,7 @@ def _ask(args, model_factory) -> int:
         synthesizer=synthesizer,
         seed=args.seed,
         store=store,
+        adversary_persona=args.persona,
     )
     verdict = council.ask(
         args.question,

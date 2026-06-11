@@ -62,8 +62,8 @@ class DemoModel:
             return self._vote(prompt)
         if "You are the synthesizer" in prompt:
             return self._synthesis(q)
-        if "You are the adversary" in prompt:
-            return self._adversarial(q)
+        if "Attack specific claims and assumptions in the consensus" in prompt:
+            return self._adversarial(q, prompt)
         if "consensus/issue map" in prompt.lower() or "Distill the critique" in prompt:
             return self._consensus_map(q)
         if "Below are independent answers" in prompt:
@@ -113,7 +113,32 @@ class DemoModel:
             f"unresolved assumption is whether the inputs are even stable enough to decide on."
         )
 
-    def _adversarial(self, q: str) -> str:
+    def _adversarial(self, q: str, prompt: str = "") -> str:
+        low = prompt.lower()
+        if "devil's advocate" in low:
+            return (
+                f"Taking the opposite side in earnest: the contrarian answer to “{q}” is "
+                f"actually the stronger bet. The consensus mistakes the popular choice for "
+                f"the correct one — flip it and most of its own arguments support the reverse."
+            )
+        if "steelman" in low:
+            return (
+                f"Granting the consensus its strongest possible form, it still fails here: "
+                f"even the most charitable reading of “{q}” rests on one load-bearing "
+                f"assumption that nobody verified — and if that cracks, the whole position does."
+            )
+        if "domain-expert" in low or "technical grounds" in low:
+            return (
+                f"On technical grounds the consensus misreads how this actually works. For "
+                f"“{q}” it assumes a clean model of the system; in practice the binding "
+                f"constraint is elsewhere, and the recommendation optimizes the wrong variable."
+            )
+        if "compliance" in low or "regulatory" in low:
+            return (
+                f"Compliance objection: under audit, “{q}” as agreed exposes real "
+                f"regulatory, privacy, and reputational risk. Several claims would not "
+                f"survive adversarial review, and the worst-case misuse path is unaddressed."
+            )
         return (
             f"Objection. The emerging consensus quietly assumes the question is well-posed. "
             f"For “{q}” that's the flaw: if the constraints shift — scale, data quality, "

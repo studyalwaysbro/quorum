@@ -79,6 +79,8 @@
   .toggle button.active { background: var(--panel-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
   .toggle button:disabled { opacity: .4; cursor: not-allowed; }
 
+  .persona-sel { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13px; outline: none; cursor: pointer; }
+  .persona-sel:focus { border-color: var(--rose); }
   .members { display: flex; flex-wrap: wrap; gap: 8px; }
   .mchip { user-select: none; cursor: pointer; font-size: 13px; padding: 6px 11px; border-radius: 999px;
            background: var(--bg); border: 1px solid var(--border); color: var(--muted); transition: .15s; }
@@ -191,6 +193,9 @@
 
       <span class="group-label">Council</span>
       <div class="members" id="members"></div>
+
+      <span class="group-label">Adversary</span>
+      <select id="persona" class="persona-sel" title="Adversary persona"></select>
 
       <button class="go" id="go">Deliberate</button>
     </div>
@@ -322,10 +327,20 @@ async function loadRoster() {
     const avail = (caps.local || []).filter(m => m.available);
     ROSTER.local = avail.map(m => m.id);
     ROSTER.localInfo = Object.fromEntries(avail.map(m => [m.id, m]));
+    ROSTER.personas = caps.personas || [];
   } catch (e) {
     ROSTER.demo = { members: ["Atlas","Beacon","Cypher"], all_members: ["Atlas","Beacon","Cypher","Juno"], skeptic: "Vex" };
     ROSTER.local = [];
+    ROSTER.personas = [];
   }
+  const sel = $("persona");
+  sel.innerHTML = "";
+  ROSTER.personas.forEach(p => {
+    const o = document.createElement("option");
+    o.value = p.id; o.textContent = p.label; o.title = p.description || "";
+    if (p.default) o.selected = true;
+    sel.appendChild(o);
+  });
   const liveBtn = $("liveBtn");
   if (!ROSTER.local || ROSTER.local.length === 0) {
     liveBtn.disabled = true;
@@ -435,6 +450,7 @@ async function deliberate() {
         skeptic: selectedSkeptic,
         allow_agentic: allowAgentic,
         labels, revote: true,
+        persona: $("persona").value || null,
       }),
     });
     if (!resp.ok) {

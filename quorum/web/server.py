@@ -37,6 +37,7 @@ from quorum.rounds import (
     critique_round,
     synthesis_round,
 )
+from quorum.personas import get_persona, persona_catalog
 from quorum.scorecard import agreement_delta, delta_to_dict, stage_agreement
 from quorum.transcript import Transcript
 from quorum.votes import normalize_labels, revote_round, tally_votes, vote_round
@@ -90,7 +91,8 @@ def capabilities() -> dict:
             "available": spec.available, "note": spec.note,
         }
         local.append(entry)
-    return {"demo": default_demo_roster(), "local": local, "skeptic_name": SKEPTIC_NAME}
+    return {"demo": default_demo_roster(), "local": local, "skeptic_name": SKEPTIC_NAME,
+            "personas": persona_catalog()}
 
 
 class RunRequest(BaseModel):
@@ -101,6 +103,7 @@ class RunRequest(BaseModel):
     allow_agentic: bool = False
     labels: list[str] = Field(default_factory=list)   # decision mode → scorecard
     revote: bool = True
+    persona: Optional[str] = None                     # adversary persona id
 
 
 @app.post("/api/runs")
@@ -131,11 +134,17 @@ def create_run(req: RunRequest, request: Request) -> dict:
                     detail="labels must be short and contain no angle brackets",
                 )
 
+    if req.persona is not None:
+        try:
+            get_persona(req.persona)
+        except KeyError:
+            raise HTTPException(status_code=400, detail=f"unknown adversary persona: {req.persona}")
+
     run_id = secrets.token_urlsafe(18)
     _RUNS[run_id] = {
         "question": req.question, "mode": req.mode,
         "members": members, "skeptic": req.skeptic,
-        "labels": labels, "revote": req.revote,
+        "labels": labels, "revote": req.revote, "persona": req.persona,
     }
     return {"run_id": run_id}
 
@@ -148,6 +157,7 @@ def run_events(run_id: str) -> StreamingResponse:
     gen = deliberation_events(
         spec["question"], spec["mode"], spec["members"], spec["skeptic"],
         labels=spec.get("labels"), revote=spec.get("revote", True),
+        persona=spec.get("persona"),
     )
     return StreamingResponse(
         gen,
@@ -236,6 +246,7 @@ def _sse(obj: dict) -> str:
 def deliberation_events(
     question: str, mode: str, members: list[str], skeptic_name: Optional[str],
     labels: Optional[list[str]] = None, revote: bool = True,
+    persona: Optional[str] = None,
 ) -> Iterator[str]:
     """Drive the rounds in council order, emitting an SSE event per turn.
 
@@ -303,7 +314,7 @@ def deliberation_events(
 
         if skeptic is not None:
             yield _sse({"type": "round", "round": "adversarial", "status": "running"})
-            adversarial_round(skeptic, question, t)
+            adversarial_round(skeptic, question, t, persona=persona)
             yield from flush_new()
             yield _sse({"type": "round", "round": "adversarial", "status": "done"})
 
