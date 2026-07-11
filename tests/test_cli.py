@@ -1,3 +1,4 @@
+import json
 import shlex
 import subprocess
 import sys
@@ -142,6 +143,71 @@ def test_cli_accepts_catalog_member_id_and_codex_skips_git_check(capsys):
         "prompt_transport": "stdin",
     }
     assert capsys.readouterr().out == "final from gpt-5.5\n"
+
+
+def test_remote_profile_seats_require_explicit_egress_consent(tmp_path, monkeypatch, capsys):
+    import quorum.providers.remote as remote
+
+    called = []
+    def fake_remote(profile, **kwargs):
+        model = ScriptedModel(profile.id)
+        model.requested_model = profile.model
+        model.reported_model = profile.model
+        return model
+    monkeypatch.setattr(
+        remote, "build_remote_model_from_profile",
+        lambda profile, **kwargs: called.append(profile.id) or fake_remote(profile),
+    )
+    assert cli.main(["ask", "private?", "--member", "remote:openai"]) == 2
+    assert "--allow-remote-egress" in capsys.readouterr().err
+    assert called == []
+    transcript = tmp_path / "remote.json"
+    html = tmp_path / "remote.html"
+    assert cli.main([
+        "ask", "private?", "--member", "remote:openai", "--allow-remote-egress",
+        "--json", str(transcript), "--html", str(html),
+    ]) == 0
+    assert called == ["openai"]
+    captured = capsys.readouterr()
+    assert captured.out == "final from openai\n"
+    assert "approved remote egress receipt" in captured.err
+    document = json.loads(transcript.read_text())
+    identity = document["turns"][0]["meta"]["remote_identity"]
+    assert identity["requested_model"] == "gpt-5.6-sol"
+    assert identity["provider_reported_model"] == "gpt-5.6-sol"
+    assert identity["model_identity_verified"] is False
+    assert "provider reported gpt-5.6-sol" in html.read_text()
+    assert cli.main(["replay", str(transcript)]) == 0
+    assert "identity: openai / requested gpt-5.6-sol" in capsys.readouterr().out
+
+
+def test_remote_receipt_tracks_actual_custom_synthesizer(monkeypatch, capsys):
+    import quorum.providers.remote as remote
+
+    def fake_remote(profile, **kwargs):
+        model = ScriptedModel(profile.id)
+        model.requested_model = profile.model
+        model.reported_model = profile.model
+        return model
+    monkeypatch.setattr(remote, "build_remote_model_from_profile", fake_remote)
+    assert cli.main([
+        "ask", "q", "--member", "remote:openai", "--member", "remote:deepseek",
+        "--synthesizer", "deepseek", "--allow-remote-egress",
+    ]) == 0
+    receipt = json.loads(capsys.readouterr().err.splitlines()[-1])
+    by_id = {item["id"]: item for item in receipt}
+    assert by_id["openai"]["receives"] == ["blind", "critique"]
+    assert by_id["deepseek"]["receives"] == ["blind", "critique", "synthesis"]
+
+    def local_factory(name, argv, timeout):
+        return ScriptedModel(name)
+    assert cli.main([
+        "ask", "q", "--member", "local=unused", "--member", "remote:deepseek",
+        "--synthesizer", "deepseek", "--allow-remote-egress",
+    ], model_factory=local_factory) == 0
+    mixed = json.loads(capsys.readouterr().err.splitlines()[-1])
+    assert mixed[0]["id"] == "deepseek"
+    assert mixed[0]["receives"] == ["blind", "critique", "synthesis"]
 
 
 def test_real_cli_invocation_with_python_member(tmp_path):

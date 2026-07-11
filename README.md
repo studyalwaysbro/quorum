@@ -148,6 +148,47 @@ The backend creates a run with CSRF-protected `POST /api/runs` and then streams
 over Server-Sent Events from `GET /api/runs/{run_id}/events`; prompts are not
 placed in URLs. Download the full replayable transcript from the result panel.
 
+### Bring your own model — without executable plugins
+
+Quorum ships audited, fixed-destination adapters for OpenAI, DeepSeek, xAI,
+Kimi, Z.AI/GLM, OpenRouter, and loopback-only Ollama. Users can install any
+exact model supported by one of those adapters as a declarative profile:
+
+```bash
+# Keys remain in the environment; these commands never accept or store one.
+quorum provider add kimi-team --provider kimi --model kimi-k2.7-code
+quorum provider add glm-team --provider zai --model glm-5.1
+quorum provider add local-llama --provider ollama --model llama3.3 --reasoning none
+
+# OpenRouter additionally requires one upstream. Quorum requests no fallback,
+# ZDR, and no data collection; provider compliance is not independently proven.
+quorum provider add claude-router --provider openrouter \
+  --model anthropic/claude-sonnet-4.5 --upstream anthropic --reasoning high
+
+quorum provider list
+quorum provider path
+```
+
+Profiles live in `~/.config/quorum/providers.json` (or
+`$XDG_CONFIG_HOME/quorum/providers.json`) as an owner-only mode-`0600` file.
+They contain profile/provider/model identifiers only—never key values. The GUI
+automatically lists installed profiles. Regular CLI councils use the explicit
+`remote:` namespace and require egress consent:
+
+```bash
+quorum ask "Compare these architectures" \
+  --member remote:kimi-team --member remote:glm-team \
+  --skeptic remote:claude-router --allow-remote-egress
+```
+
+Remote profiles cannot define URLs, ports, headers, credential names, request
+templates, shell commands, Python hooks, tools, provider plugins, file IDs, or
+fallbacks. Quorum requires the response to report the exact requested model;
+a missing or different model aborts the call. Reasoning metadata says
+“requested/unverified” because an API accepting a parameter is not proof the
+backend honored it. Arbitrary OpenAI-compatible endpoints are intentionally not
+supported: URL validation alone is not a safe SSRF/DNS-rebinding boundary.
+
 ---
 
 ## Research mode — ground a council in your document
@@ -184,8 +225,10 @@ benign. See [`SECURITY.md`](SECURITY.md).
 The same secure path is available from the CLI:
 
 ```bash
-# First set one provider credential in your environment:
-# DEEPSEEK_API_KEY, OPENAI_API_KEY, or XAI_API_KEY
+# First set the selected profile's provider credential in your environment.
+# Built-ins use OPENAI_API_KEY, DEEPSEEK_API_KEY, XAI_API_KEY,
+# MOONSHOT_API_KEY, ZAI_API_KEY, or OPENROUTER_API_KEY. Ollama is keyless loopback for ordinary
+# councils only; unverified loopback services are blocked from attachments.
 quorum research "Which claims does this evidence support?" \
   --file report.pdf --file metrics.csv \
   --provider deepseek --prepare review-manifest.json

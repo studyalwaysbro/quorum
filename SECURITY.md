@@ -20,8 +20,9 @@ File uploads are **hostile, untrusted content**. Attachment mode never invokes
 the local Codex, Grok, DeepSeek, Claude, or arbitrary command adapters: those
 processes retain authentication and may have filesystem/tools, so environment
 scrubbing alone is not a sandbox. Real attachment analysis instead uses
-fixed-host HTTPS adapters with no tool definitions, no conversation/file IDs,
-no redirects, bounded requests/responses, and explicit per-run egress consent.
+audited fixed-host HTTPS or exact-loopback adapters with no tool definitions,
+no conversation/file IDs, no redirects, bounded requests/responses, and
+explicit per-run egress consent.
 
 Before egress, Quorum validates extension plus file signature, enforces byte,
 file, character, row/column, page, pixel, frame, and timeout caps, rejects
@@ -59,6 +60,49 @@ protects output integrity, not provider confidentiality.
   - never puts a key (or a prompt) in a URL.
 - `/api/capabilities` returns **booleans and metadata only** — which providers
   are configured, never their values.
+
+## Declarative provider profiles
+
+User model profiles select only a compiled provider adapter plus an exact model,
+reasoning request, safe label, and—only for OpenRouter—one upstream slug. The
+mode-`0600`, current-user-owned JSON file is bounded, duplicate-key rejecting,
+strict-schema validated, non-symlink, and atomically replaced. Unknown fields
+fail closed. It cannot contain endpoint URLs, credentials, credential-variable
+names, headers, cookies, query parameters, templates, commands, imports, hooks,
+tools, plugins, file IDs, storage flags, or arbitrary response parsers.
+
+Compiled adapters currently cover direct OpenAI, DeepSeek, xAI, Kimi, and Z.AI
+HTTPS origins; OpenRouter's fixed HTTPS origin; and the exact Ollama loopback
+origin `http://127.0.0.1:11434` for ordinary councils only. Ollama/loopback is
+code-blocked from attachment research because a port does not prove the server
+is stock Ollama, tool-free, filesystem-free, or non-persistent. Arbitrary
+public, LAN, private, link-local, or
+metadata endpoints are not supported, so an installed profile cannot expand
+the network allowlist. Ollama never receives an Authorization header. Remote
+HTTPS calls explicitly disable ambient proxy handlers, reject redirects, require
+JSON responses, and retain the existing time/request/response/output limits.
+
+OpenRouter requests name one `only` upstream, disable fallbacks, require
+parameter support, deny data collection, and require ZDR. These are requested
+routing controls, not cryptographic proof of the physical inference host; the
+GUI and manifest identify OpenRouter as a routed provider. Dynamic/automatic
+model aliases are rejected. All adapters require a nonempty response `model`
+that exactly matches the request before any response enters a council.
+
+Regular remote councils require explicit CLI or GUI egress consent because the
+protocol intentionally shares the question and model outputs between selected
+members during critique/synthesis. Attachment manifests bind each recipient's
+rounds, exact model, compiled endpoint/protocol/trust class, output and reasoning
+policy, router policy, research-prompt policy, and a canonical profile
+egress snapshot hash. CLI execution resolves once, compares that immutable
+object with the approved manifest, and constructs from the same object. GUI
+prepare/consent stores the reviewed immutable objects and constructs from those,
+so a concurrent config replacement cannot change the approved route.
+
+Reasoning settings are reported as requested but unverified. Quorum can prove
+which JSON it sent, not that a provider actually honored the setting internally.
+Provider-profile research uses manifest version 2; version-1 manifests must be
+prepared and reviewed again because they lack the expanded egress snapshot.
 
 ## Subprocess isolation
 

@@ -31,7 +31,11 @@ from pydantic import BaseModel, Field
 from quorum.adapters import Model
 from quorum.providers import LOCAL_CATALOG, Audition, build_local_model, get_spec, probe
 from quorum.providers.catalog import LocalModelSpec
-from quorum.providers.remote import build_remote_model, get_remote_spec, remote_capabilities
+from quorum.providers.remote import (
+    annotate_remote_transcript, build_remote_model_from_profile,
+    ensure_attachment_eligible, get_provider_profile, provider_snapshot,
+    remote_capabilities, remote_identity,
+)
 from quorum.rounds import (
     adversarial_round,
     blind_round,
@@ -95,9 +99,19 @@ def _require_local_post(request: Request) -> None:
     """
     if request.headers.get("x-quorum-csrf") != "1":
         raise HTTPException(status_code=403, detail="missing CSRF header")
+    host_value = request.headers.get("host", "")
+    host_url = urlparse(f"http://{host_value}")
+    if not host_value or host_url.username or host_url.password \
+            or host_url.hostname not in LOCAL_HOSTS:
+        raise HTTPException(status_code=403, detail="untrusted Host header")
     origin = request.headers.get("origin") or request.headers.get("referer")
-    if origin is not None and urlparse(origin).hostname not in LOCAL_HOSTS:
-        raise HTTPException(status_code=403, detail="cross-origin request blocked")
+    if origin is not None:
+        parsed_origin = urlparse(origin)
+        if origin == "null" or parsed_origin.scheme not in {"http", "https"} \
+                or parsed_origin.username or parsed_origin.password \
+                or parsed_origin.hostname not in LOCAL_HOSTS \
+                or parsed_origin.netloc.lower() != host_value.lower():
+            raise HTTPException(status_code=403, detail="cross-origin request blocked")
 
 
 # --------------------------------------------------------------- routes
@@ -128,6 +142,8 @@ class RunRequest(BaseModel):
     members: list[str] = Field(default_factory=list)
     skeptic: Optional[str] = None
     allow_agentic: bool = False
+    allow_remote: bool = False
+    remote_fingerprints: dict[str, str] = Field(default_factory=dict)
     labels: list[str] = Field(default_factory=list)   # decision mode → scorecard
     revote: bool = True
     persona: Optional[str] = None                     # adversary persona id
@@ -138,8 +154,8 @@ def create_run(req: RunRequest, request: Request) -> dict:
     _require_local_post(request)
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="empty question")
-    if req.mode not in ("demo", "local"):
-        raise HTTPException(status_code=400, detail="mode must be 'demo' or 'local'")
+    if req.mode not in ("demo", "local", "remote"):
+        raise HTTPException(status_code=400, detail="mode must be 'demo', 'local', or 'remote'")
 
     members = req.members or (default_demo_roster()["members"] if req.mode == "demo" else [])
     if not members:
@@ -147,6 +163,31 @@ def create_run(req: RunRequest, request: Request) -> dict:
 
     if req.mode == "local":   # allowlist enforcement — no arbitrary PATH exec
         _validate_local_selection(members, req.skeptic, req.allow_agentic)
+    remote_snapshots = None
+    remote_profiles = None
+    remote_skeptic = None
+    if req.mode == "remote":
+        if not req.allow_remote:
+            raise HTTPException(status_code=403, detail="remote provider egress requires explicit consent")
+        selected = members + ([req.skeptic] if req.skeptic else [])
+        if len(selected) != len(set(selected)):
+            raise HTTPException(status_code=400, detail="remote provider profiles must be unique")
+        configured = {item["id"]: item["configured"] for item in remote_capabilities()}
+        resolved = []
+        for profile_id in selected:
+            try:
+                profile = get_provider_profile(profile_id)
+            except KeyError:
+                raise HTTPException(status_code=400, detail=f"unknown remote provider profile: {profile_id}")
+            if not configured.get(profile_id):
+                raise HTTPException(status_code=400, detail=f"remote provider is not configured: {profile_id}")
+            if req.remote_fingerprints.get(profile_id) != profile.fingerprint:
+                raise HTTPException(status_code=409, detail="remote profile changed since review; refresh and consent again")
+            resolved.append(profile)
+        if set(req.remote_fingerprints) != set(selected):
+            raise HTTPException(status_code=400, detail="remote consent fingerprints do not match the roster")
+        remote_profiles = resolved[:len(members)]
+        remote_skeptic = resolved[-1] if req.skeptic else None
 
     labels = None
     if req.labels:
@@ -167,10 +208,19 @@ def create_run(req: RunRequest, request: Request) -> dict:
         except KeyError:
             raise HTTPException(status_code=400, detail=f"unknown adversary persona: {req.persona}")
 
+    if req.mode == "remote":
+        remote_snapshots = _regular_provider_snapshots(
+            remote_profiles, remote_skeptic,
+            decision=bool(labels) and len(members) > 1,
+            revote=req.revote,
+        )
+
     run_id = secrets.token_urlsafe(18)
     _RUNS[run_id] = {
         "question": req.question, "mode": req.mode,
         "members": members, "skeptic": req.skeptic,
+        "remote_snapshots": remote_snapshots,
+        "remote_profiles": remote_profiles, "remote_skeptic": remote_skeptic,
         "labels": labels, "revote": req.revote, "persona": req.persona,
     }
     return {"run_id": run_id}
@@ -184,24 +234,70 @@ def run_events(run_id: str) -> StreamingResponse:
     gen = deliberation_events(
         spec["question"], spec["mode"], spec["members"], spec["skeptic"],
         labels=spec.get("labels"), revote=spec.get("revote", True),
-        persona=spec.get("persona"),
+        persona=spec.get("persona"), remote_snapshots=spec.get("remote_snapshots"),
+        remote_profiles=spec.get("remote_profiles"), remote_skeptic=spec.get("remote_skeptic"),
     )
     return StreamingResponse(
         gen,
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
 
 
 # --------------------------------------------------------------- engine
-def _build_models(mode: str, member_ids: list[str], skeptic_id: Optional[str]):
+def _build_models(
+    mode: str, member_ids: list[str], skeptic_id: Optional[str],
+    remote_snapshots: Optional[list[dict]] = None,
+    remote_profiles=None, remote_skeptic=None,
+    decision: bool = False, revote: bool = True,
+):
     if mode == "local":
         members: list[Model] = [build_local_model(mid) for mid in member_ids]
         skeptic = build_local_model(skeptic_id) if skeptic_id else None
         return members, skeptic
+    if mode == "remote":
+        profiles = list(remote_profiles) if remote_profiles is not None else [
+            get_provider_profile(profile_id) for profile_id in member_ids
+        ]
+        skeptic_profile = remote_skeptic if remote_skeptic is not None else (
+            get_provider_profile(skeptic_id) if skeptic_id else None
+        )
+        current = _regular_provider_snapshots(
+            profiles, skeptic_profile, decision=decision, revote=revote,
+        )
+        if remote_snapshots is not None and current != remote_snapshots:
+            raise ValueError("remote provider profile changed after consent")
+        members = [build_remote_model_from_profile(profile) for profile in profiles]
+        skeptic = build_remote_model_from_profile(skeptic_profile) if skeptic_profile else None
+        return members, skeptic
     members = [demo_member(name) for name in member_ids]
     skeptic = demo_skeptic(skeptic_id) if skeptic_id else None
     return members, skeptic
+
+
+def _regular_provider_snapshots(
+    profiles, skeptic_profile=None, *, decision: bool = False, revote: bool = True,
+) -> list[dict]:
+    snapshots = []
+    multi = len(profiles) > 1
+    for index, profile in enumerate(profiles):
+        receives = ["blind"]
+        if decision:
+            receives.append("vote")
+        if multi:
+            receives.append("critique")
+            if index == 0:
+                receives.append("consensus_map")
+        if decision and revote:
+            receives.append("revote")
+        if index == 0:
+            receives.append("synthesis")
+        snapshots.append(provider_snapshot(profile, receives=tuple(receives)))
+    if skeptic_profile:
+        snapshots.append(provider_snapshot(
+            skeptic_profile, receives=("adversarial",),
+        ))
+    return snapshots
 
 
 def _validate_local_selection(
@@ -274,6 +370,8 @@ def deliberation_events(
     question: str, mode: str, members: list[str], skeptic_name: Optional[str],
     labels: Optional[list[str]] = None, revote: bool = True,
     persona: Optional[str] = None,
+    remote_snapshots: Optional[list[dict]] = None,
+    remote_profiles=None, remote_skeptic=None,
 ) -> Iterator[str]:
     """Drive the rounds in council order, emitting an SSE event per turn.
 
@@ -286,7 +384,18 @@ def deliberation_events(
     multi = len(members) > 1
     decision = bool(labels) and multi
 
-    member_models, skeptic = _build_models(mode, members, skeptic_name)
+    member_models, skeptic = _build_models(
+        mode, members, skeptic_name, remote_snapshots, remote_profiles, remote_skeptic,
+        decision, revote,
+    )
+    remote_models = member_models + ([skeptic] if skeptic is not None else []) \
+        if mode == "remote" else []
+    identity_by_profile = {}
+    if mode == "remote" and remote_snapshots:
+        identity_by_profile = {
+            model.name: (model, snapshot)
+            for model, snapshot in zip(remote_models, remote_snapshots)
+        }
     distiller = member_models[0] if len(member_models) > 1 else None
     t = Transcript(question=question)
     seen = 0
@@ -298,8 +407,13 @@ def deliberation_events(
         for turn in t.turns[seen:]:
             if turn.round in ("vote", "revote"):   # votes feed the scorecard, not cards
                 continue
+            identity_pair = identity_by_profile.get(turn.model)
+            identity = None
+            if identity_pair is not None:
+                identity = remote_identity(*identity_pair)
+                turn.meta["remote_identity"] = identity
             yield _sse({"type": "turn", "round": turn.round, "model": turn.model,
-                        "response": turn.response})
+                        "response": turn.response, "remote_identity": identity})
             if pace:
                 time.sleep(pace)
         seen = len(t.turns)
@@ -314,7 +428,8 @@ def deliberation_events(
     yield _sse({"type": "start", "question": question, "mode": mode, "stages": stages,
                 "members": [m.name for m in member_models],
                 "skeptic": skeptic.name if skeptic else None,
-                "decision": decision, "labels": list(labels) if labels else None})
+                "decision": decision, "labels": list(labels) if labels else None,
+                "remote_profiles": remote_snapshots if mode == "remote" else None})
 
     try:
         yield _sse({"type": "round", "round": "blind", "status": "running"})
@@ -359,10 +474,12 @@ def deliberation_events(
         yield _sse({"type": "round", "round": "synthesis", "status": "done"})
 
         yield _sse({"type": "answer", "answer": answer, "by": synthesizer.name})
+        if remote_models and remote_snapshots:
+            annotate_remote_transcript(t, remote_models, remote_snapshots)
         yield _sse({"type": "transcript", "transcript": t.to_dict()})
         yield _sse({"type": "done"})
-    except Exception as exc:  # never 500 mid-stream
-        yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+    except Exception:  # never expose subprocess/provider errors mid-stream
+        yield _sse({"type": "error", "message": "council run failed safely; inspect local diagnostics"})
 
 
 # ============================ research mode (uploads) ============================
@@ -446,6 +563,7 @@ async def create_research_run(request: Request) -> dict:
             detail="attachments support demo or stateless remote mode; local agentic CLIs are blocked",
         )
     provider_ids: list[str] = []
+    resolved_provider_profiles = []
     if mode == "remote":
         provider_ids = [p.strip() for p in str(form.get("providers", "")).split(",") if p.strip()]
         if not provider_ids or len(provider_ids) != len(set(provider_ids)):
@@ -453,11 +571,16 @@ async def create_research_run(request: Request) -> dict:
         configured = {item["id"]: item["configured"] for item in remote_capabilities()}
         for provider_id in provider_ids:
             try:
-                get_remote_spec(provider_id)
+                profile = get_provider_profile(provider_id)
             except KeyError:
-                raise HTTPException(status_code=400, detail=f"unknown remote provider: {provider_id}")
+                raise HTTPException(status_code=400, detail=f"unknown remote provider profile: {provider_id}")
             if not configured.get(provider_id):
                 raise HTTPException(status_code=400, detail=f"remote provider is not configured: {provider_id}")
+            try:
+                ensure_attachment_eligible(profile)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            resolved_provider_profiles.append(profile)
 
     files = []
     remaining = ATTACHMENT_TOTAL_BYTES
@@ -489,8 +612,11 @@ async def create_research_run(request: Request) -> dict:
     chunks = [SourceChunk(c.id, redact_text(c.text), c.source) for c in chunks]
 
     provider_manifest = [
-        {"id": provider_id, "model": get_remote_spec(provider_id).default_model}
-        for provider_id in provider_ids
+        provider_snapshot(
+            resolved_provider_profiles[index],
+            receives=("grounded_blind", "fact_check") if index == 0 else ("grounded_blind",),
+        )
+        for index, provider_id in enumerate(provider_ids)
     ]
     manifest = build_manifest(
         question, chunks, provider_manifest, files=len(results),
@@ -508,7 +634,8 @@ async def create_research_run(request: Request) -> dict:
         _RESEARCH_RUNS[run_id] = {
             "question": question, "mode": mode, "chunks": chunks,
             "providers": provider_ids,
-            "provider_models": {item["id"]: item["model"] for item in provider_manifest},
+            "resolved_provider_profiles": resolved_provider_profiles,
+            "provider_snapshots": provider_manifest,
             "manifest_hash": manifest["manifest_hash"],
             "approved": mode == "demo",
             "source_chars": source_chars, "created_at": now,
@@ -568,7 +695,8 @@ def research_run_events(run_id: str) -> StreamingResponse:
 
 def _build_research_models(
     mode: str, provider_ids: list[str] | tuple[str, ...] = (),
-    provider_models: Optional[dict[str, str]] = None,
+    provider_snapshots: Optional[list[dict]] = None,
+    resolved_profiles=None,
 ):
     """Build only demo stubs or stateless, tool-free fixed-host API models.
 
@@ -580,11 +708,21 @@ def _build_research_models(
         members = [demo_research_member(n, i) for i, n in enumerate(["Atlas", "Beacon", "Cypher"])]
         return members, demo_research_member("Vex", 9)
     if mode == "remote" and provider_ids:
-        provider_models = provider_models or {}
-        members = [
-            build_remote_model(provider_id, model=provider_models.get(provider_id))
-            for provider_id in provider_ids
+        profiles = list(resolved_profiles) if resolved_profiles is not None else [
+            get_provider_profile(provider_id) for provider_id in provider_ids
         ]
+        for profile in profiles:
+            ensure_attachment_eligible(profile)
+        current = [
+            provider_snapshot(
+                profile,
+                receives=("grounded_blind", "fact_check") if index == 0 else ("grounded_blind",),
+            )
+            for index, profile in enumerate(profiles)
+        ]
+        if provider_snapshots is not None and current != provider_snapshots:
+            raise ValueError("provider profile changed after approval")
+        members = [build_remote_model_from_profile(profile) for profile in profiles]
         return members, None
     raise ValueError("local/agentic attachment research is disabled")
 
@@ -594,7 +732,8 @@ def research_events(spec: dict, run_id: str):
         chunks, question, mode = spec["chunks"], spec["question"], spec["mode"]
         pace = 0.25 if mode == "demo" else 0.0
         members, skeptic = _build_research_models(
-            mode, spec.get("providers", ()), spec.get("provider_models")
+            mode, spec.get("providers", ()), spec.get("provider_snapshots"),
+            spec.get("resolved_provider_profiles"),
         )
         t = Transcript(question=question)
 
@@ -624,7 +763,7 @@ def research_events(spec: dict, run_id: str):
         ledger = ClaimLedger(question, pooled).finalize()
         yield _sse({"type": "ledger", "ledger": ledger.to_dict()})
         yield _sse({"type": "done"})
-    except Exception as exc:
-        yield _sse({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+    except Exception:
+        yield _sse({"type": "error", "message": "research run failed safely; no provider details were exposed"})
     finally:
         _RESEARCH_RUNS.pop(run_id, None)               # free memory + reservation

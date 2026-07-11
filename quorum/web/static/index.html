@@ -250,6 +250,7 @@
       <div class="toggle" id="mode">
         <button data-mode="demo" class="active">Demo</button>
         <button data-mode="local" id="liveBtn">Local CLIs</button>
+        <button data-mode="remote" id="remoteBtn">Remote profiles</button>
       </div>
 
       <span class="group-label">Council</span>
@@ -293,7 +294,7 @@
     <div id="ledger"></div>
   </div>
 
-  <p class="footnote" id="foot">Demo stays local. Normal local councils use allowlisted CLIs. Attachment research never uses those agentic CLIs: remote mode sends redacted extracted text only to explicitly selected, fixed-host, tool-free APIs after per-run consent.</p>
+  <p class="footnote" id="foot">Demo stays local. Normal local councils use allowlisted CLIs. Attachment research never uses those agentic CLIs: remote mode sends redacted extracted text only to explicitly selected, eligible audited fixed-host HTTPS profiles after per-run consent. Loopback/Ollama is ordinary-council-only and blocked for attachments. User profiles cannot define URLs, keys, headers, tools, plugins, or fallbacks.</p>
 </div>
 
 <script>
@@ -312,7 +313,7 @@ const STAGE_META = {
 };
 
 let MODE = "demo";
-let ROSTER = { demo: { members: [], all_members: [], skeptic: "Vex" }, local: [], localInfo: {}, remote: [], skeptic_name: "Vex" };
+let ROSTER = { demo: { members: [], all_members: [], skeptic: "Vex" }, local: [], localInfo: {}, remote: [], remoteInfo: {}, skeptic_name: "Vex" };
 let selectedMembers = new Set();
 let skepticOn = true;
 let es = null;
@@ -334,18 +335,19 @@ function renderExamples() {
 }
 
 function memberPool() {
-  return MODE === "local" ? ROSTER.local : ROSTER.demo.all_members;
+  return MODE === "local" ? ROSTER.local : MODE === "remote" ? ROSTER.remote.map(p => p.id) : ROSTER.demo.all_members;
 }
 
 function renderMembers() {
   const box = $("members"); box.innerHTML = "";
   const pool = memberPool();
   pool.forEach(name => {
-    const info = MODE === "local" ? ROSTER.localInfo[name] : null;
+    const info = MODE === "local" ? ROSTER.localInfo[name] : MODE === "remote" ? ROSTER.remoteInfo[name] : null;
     const chip = document.createElement("span");
     chip.className = "mchip";
-    chip.textContent = info && info.agentic ? name + " (agentic)" : name;
-    if (info) chip.title = info.note || "";
+    chip.textContent = info && info.agentic ? name + " (agentic)"
+      : MODE === "remote" && info ? `${name} · ${info.model}` : name;
+    if (info) chip.title = info.note || `${info.trust || ""} · reasoning ${info.reasoning_requested || "provider default"} requested/unverified`;
     chip.dataset.on = selectedMembers.has(name) ? "1" : "0";
     chip.onclick = () => {
       if (selectedMembers.has(name)) selectedMembers.delete(name);
@@ -358,9 +360,8 @@ function renderMembers() {
     box.appendChild(chip);
   });
   // skeptic chip
-  const skName = MODE === "local"
-    ? (ROSTER.local.find(n => !selectedMembers.has(n)) || ROSTER.local[0] || "")
-    : ROSTER.demo.skeptic;
+  const skName = MODE === "demo" ? ROSTER.demo.skeptic
+    : (memberPool().find(n => !selectedMembers.has(n)) || "");
   const sk = document.createElement("span");
   sk.className = "mchip skeptic";
   sk.textContent = "⚔ " + skName + " (skeptic)";
@@ -381,6 +382,10 @@ function defaultSelection() {
     });
     selectedMembers = new Set(defaults.slice(0, 3));
     skepticOn = false;   // local skeptic off by default (avoid surprise auth errors)
+  } else if (MODE === "remote") {
+    const configured = ROSTER.remote.filter(p => p.configured).map(p => p.id);
+    selectedMembers = new Set(configured.slice(0, 2));
+    skepticOn = configured.length >= 3;
   } else {
     selectedMembers = new Set(ROSTER.demo.members.slice(0, 3));
     skepticOn = true;
@@ -411,11 +416,13 @@ async function loadRoster() {
     ROSTER.local = avail.map(m => m.id);
     ROSTER.localInfo = Object.fromEntries(avail.map(m => [m.id, m]));
     ROSTER.remote = caps.remote || [];
+    ROSTER.remoteInfo = Object.fromEntries(ROSTER.remote.map(p => [p.id, p]));
     ROSTER.personas = caps.personas || [];
   } catch (e) {
     ROSTER.demo = { members: ["Atlas","Beacon","Cypher"], all_members: ["Atlas","Beacon","Cypher","Juno"], skeptic: "Vex" };
     ROSTER.local = [];
     ROSTER.remote = [];
+    ROSTER.remoteInfo = {};
     ROSTER.personas = [];
   }
   const sel = $("persona");
@@ -430,6 +437,11 @@ async function loadRoster() {
   if (!ROSTER.local || ROSTER.local.length === 0) {
     liveBtn.disabled = true;
     liveBtn.title = "No allowlisted CLIs detected on this host";
+  }
+  const remoteBtn = $("remoteBtn");
+  if (!(ROSTER.remote || []).some(p => p.configured)) {
+    remoteBtn.disabled = true;
+    remoteBtn.title = "No configured audited remote profiles";
   }
   defaultSelection();
   renderMembers();
@@ -458,12 +470,15 @@ function setStatus(round, status) {
                  : status === "done" ? '<span class="check">✓</span>' : "";
 }
 
-function addTurn(round, model, response) {
+function addTurn(round, model, response, remoteIdentity = null) {
   const el = stageEl(round);
   const turns = el.querySelector(".turns");
   const t = document.createElement("div");
   t.className = "turn" + (round === "consensus_map" ? " map" : "");
-  const who = document.createElement("div"); who.className = "who"; who.textContent = model;
+  const who = document.createElement("div"); who.className = "who";
+  who.textContent = remoteIdentity
+    ? `${model} · ${remoteIdentity.provider} · requested ${remoteIdentity.requested_model} · provider reported ${remoteIdentity.provider_reported_model} · identity unverified`
+    : model;
   const body = document.createElement("div"); body.className = "body"; body.textContent = response;
   t.appendChild(who); t.appendChild(body);
   turns.appendChild(t);
@@ -530,6 +545,21 @@ async function deliberate() {
     const allowAgentic = MODE === "local" && (
       members.some(isAgentic) || (selectedSkeptic && isAgentic(selectedSkeptic))
     );
+    if (MODE === "remote") {
+      const selected = [...members, ...(selectedSkeptic ? [selectedSkeptic] : [])];
+      const disclosure = selected.map(id => {
+        const p = ROSTER.remoteInfo[id] || {};
+        return `${id}: ${p.provider || "provider"} / ${p.model || "model"}${p.upstream ? ` / upstream ${p.upstream}` : ""}`;
+      }).join("\n");
+      if (!window.confirm(
+        "Remote egress consent\n\nYour question and council outputs will be shared across these exact profiles:\n" +
+        disclosure + "\n\nQuorum sends no tools and requests no fallback; provider compliance is not independently verified. Continue?"
+      )) { $("go").disabled = false; return; }
+    }
+    const remoteFingerprints = MODE === "remote"
+      ? Object.fromEntries([...members, ...(selectedSkeptic ? [selectedSkeptic] : [])]
+          .map(id => [id, (ROSTER.remoteInfo[id] || {}).profile_fingerprint || ""]))
+      : {};
     const resp = await fetch("/api/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Quorum-CSRF": "1" },
@@ -537,6 +567,8 @@ async function deliberate() {
         question, mode: MODE, members,
         skeptic: selectedSkeptic,
         allow_agentic: allowAgentic,
+        allow_remote: MODE === "remote",
+        remote_fingerprints: remoteFingerprints,
         labels, revote: true,
         persona: $("persona").value || null,
       }),
@@ -557,7 +589,7 @@ async function deliberate() {
     const m = JSON.parse(ev.data);
     if (m.type === "round") setStatus(m.round, m.status);
     else if (m.type === "turn") {
-      addTurn(m.round, m.model, m.response);
+      addTurn(m.round, m.model, m.response, m.remote_identity);
       if (m.round === "adversarial") traceAdversary = { model: m.model, text: m.response };
       else if (m.round === "consensus_map") traceMap = m.response;
     }
@@ -833,7 +865,10 @@ function renderRemoteProviders() {
   (ROSTER.remote || []).forEach(p => {
     const label = document.createElement("label"); label.className = "mchip";
     const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = p.id; cb.disabled = !p.configured;
-    const text = document.createElement("span"); text.textContent = `${p.label} · ${p.default_model}${p.configured ? "" : " (API key not configured)"}`;
+    const route = p.routed ? ` · upstream ${p.upstream} requested/unverified` : "";
+    const reason = p.reasoning_requested ? ` · reasoning ${p.reasoning_requested} requested/unverified` : "";
+    const text = document.createElement("span");
+    text.textContent = `${p.label} · ${p.default_model} · ${p.trust}${route}${reason}${p.configured ? "" : " (credential not configured)"}`;
     label.append(cb, text); box.appendChild(label);
   });
 }

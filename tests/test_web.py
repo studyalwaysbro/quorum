@@ -18,7 +18,7 @@ from quorum.providers.catalog import LocalModelSpec  # noqa: E402
 from quorum.web import server  # noqa: E402
 from quorum.web.server import app  # noqa: E402
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://127.0.0.1:8000")
 CSRF = {"X-Quorum-CSRF": "1"}
 
 
@@ -119,6 +119,113 @@ def test_post_rejects_cross_origin():
     r = client.post("/api/runs", json={"question": "x", "mode": "demo"},
                     headers={**CSRF, "Origin": "http://evil.example"})
     assert r.status_code == 403
+
+
+def test_post_rejects_null_origin_wrong_port_and_dns_rebinding_host():
+    body = {"question": "x", "mode": "demo", "members": ["Atlas"]}
+    assert client.post("/api/runs", json=body,
+                       headers={**CSRF, "Origin": "null"}).status_code == 403
+    assert client.post("/api/runs", json=body,
+                       headers={**CSRF, "Origin": "http://testserver:9999"}).status_code == 403
+    assert client.post("/api/runs", json=body,
+                       headers={**CSRF, "Host": "attacker.example"}).status_code == 403
+    assert client.post("/api/runs", json=body,
+                       headers={**CSRF, "Host": "testserver", "Origin": "http://testserver"}).status_code == 403
+
+
+def test_remote_council_requires_explicit_consent_and_fixed_profiles(monkeypatch):
+    from quorum.providers.remote import get_provider_profile
+    profile = get_provider_profile("openai")
+    monkeypatch.setattr(server, "remote_capabilities", lambda: [{
+        "id": "openai", "configured": True,
+    }])
+    body = {"question": "x", "mode": "remote", "members": ["openai"]}
+    denied = client.post("/api/runs", json=body, headers=CSRF)
+    assert denied.status_code == 403
+    allowed = client.post(
+        "/api/runs", json={**body, "allow_remote": True,
+                            "remote_fingerprints": {"openai": profile.fingerprint}}, headers=CSRF,
+    )
+    assert allowed.status_code == 200, allowed.text
+    spec = server._RUNS.pop(allowed.json()["run_id"])
+    assert spec["remote_snapshots"][0]["provider"] == "openai"
+    assert spec["remote_snapshots"][0]["receives"] == ["blind", "synthesis"]
+
+
+def test_remote_council_profile_drift_fails_before_construction(monkeypatch):
+    from quorum.providers.remote import get_provider_profile
+    profiles = [get_provider_profile("openai")]
+    prepared = server._regular_provider_snapshots(profiles, None)
+    changed = [{**prepared[0], "model": "changed"}]
+    called = []
+    monkeypatch.setattr(server, "_regular_provider_snapshots", lambda *args, **kwargs: changed)
+    monkeypatch.setattr(server, "build_remote_model_from_profile", lambda *args: called.append(args))
+    with pytest.raises(ValueError, match="changed after consent"):
+        server._build_models("remote", ["openai"], None, prepared, profiles, None)
+    assert called == []
+
+
+def test_remote_gui_receipt_lists_every_actual_decision_round():
+    from quorum.providers.remote import get_provider_profile
+    profiles = [get_provider_profile("openai"), get_provider_profile("deepseek")]
+    skeptic = get_provider_profile("xai")
+    snapshots = server._regular_provider_snapshots(
+        profiles, skeptic, decision=True, revote=True,
+    )
+    assert snapshots[0]["receives"] == [
+        "blind", "vote", "critique", "consensus_map", "revote", "synthesis"
+    ]
+    assert snapshots[1]["receives"] == ["blind", "vote", "critique", "revote"]
+    assert snapshots[2]["receives"] == ["adversarial"]
+
+
+def test_remote_gui_stale_review_fingerprint_is_rejected(tmp_path, monkeypatch):
+    from quorum.providers.profiles import make_user_profile, write_user_profiles
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config = tmp_path / "quorum" / "providers.json"
+    old = make_user_profile("local-reviewed", "ollama", "llama3.2", reasoning="none")
+    write_user_profiles([old], config)
+    reviewed = client.get("/api/capabilities").json()
+    fingerprint = next(p for p in reviewed["remote"] if p["id"] == old.id)["profile_fingerprint"]
+    write_user_profiles([
+        make_user_profile("local-reviewed", "ollama", "different-model", reasoning="none")
+    ], config)
+    response = client.post("/api/runs", headers=CSRF, json={
+        "question": "private", "mode": "remote", "members": [old.id],
+        "allow_remote": True, "remote_fingerprints": {old.id: fingerprint},
+    })
+    assert response.status_code == 409
+    assert not any(spec.get("question") == "private" for spec in server._RUNS.values())
+
+
+def test_remote_gui_transcript_keeps_identity_and_redacts_echoed_key(monkeypatch):
+    from quorum.providers.remote import RemoteTextModel, get_provider_profile
+
+    profile = get_provider_profile("deepseek")
+    secret = "sk-synthetic-gui-never-expose-123456"
+    def transport(*args):
+        return json.dumps({
+            "model": profile.model,
+            "choices": [{"message": {"content": f"answer {secret}"}}],
+        }).encode()
+    model = RemoteTextModel("deepseek", secret, transport=transport)
+    model.name = profile.id
+    monkeypatch.setattr(server, "build_remote_model_from_profile", lambda approved: model)
+    snapshots = server._regular_provider_snapshots([profile], None)
+    raw = list(server.deliberation_events(
+        "q", "remote", [profile.id], None,
+        remote_snapshots=snapshots, remote_profiles=[profile],
+    ))
+    wire = "".join(raw)
+    assert secret not in wire
+    events = [json.loads(line[6:]) for chunk in raw for line in chunk.splitlines()
+              if line.startswith("data: ")]
+    turn = next(event for event in events if event["type"] == "turn")
+    assert turn["remote_identity"]["requested_model"] == profile.model
+    assert turn["remote_identity"]["provider_reported_model"] == profile.model
+    transcript = next(event["transcript"] for event in events if event["type"] == "transcript")
+    assert transcript["meta"]["remote_profiles"][0]["model_identity_verified"] is False
 
 
 def test_unknown_local_model_rejected_at_post():

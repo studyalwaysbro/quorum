@@ -41,8 +41,8 @@ def test_research_cli_redacts_and_writes_private_ledger(tmp_path, monkeypatch, c
     manifest = tmp_path / "manifest.json"
     seen = []
     monkeypatch.setattr(
-        remote, "build_remote_model",
-        lambda provider_id, **kwargs: GroundedModel(provider_id, seen),
+        remote, "build_remote_model_from_profile",
+        lambda profile, **kwargs: GroundedModel(profile.id, seen),
     )
 
     assert cli.main([
@@ -79,3 +79,74 @@ def test_research_cli_rejects_unknown_provider_before_model_call(tmp_path, capsy
         "--prepare", str(tmp_path / "manifest.json"),
     ]) == 2
     assert "unknown remote provider" in capsys.readouterr().err
+
+
+def test_research_cli_rejects_ollama_before_reading_files(tmp_path, capsys):
+    missing = tmp_path / "must-not-read.txt"
+    assert cli.main([
+        "research", "q", "--file", str(missing), "--provider", "ollama",
+        "--prepare", str(tmp_path / "manifest.json"),
+    ]) == 2
+    error = capsys.readouterr().err
+    assert "not eligible for attachment research" in error
+    assert "must-not-read" not in error
+
+
+def test_research_cli_rejects_profile_change_after_prepare(tmp_path, monkeypatch, capsys):
+    from quorum.providers.profiles import make_user_profile, write_user_profiles
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    config = tmp_path / "config" / "quorum" / "providers.json"
+    write_user_profiles([
+        make_user_profile("glm-team", "zai", "glm-5.1")
+    ], config)
+    source = tmp_path / "source.txt"
+    source.write_text("evidence", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    assert cli.main([
+        "research", "q", "--file", str(source), "--provider", "glm-team",
+        "--prepare", str(manifest),
+    ]) == 0
+    prepared = json.loads(capsys.readouterr().out)
+    write_user_profiles([
+        make_user_profile("glm-team", "zai", "glm-5.1-new")
+    ], config)
+    assert cli.main([
+        "research", "q", "--manifest", str(manifest), "--provider", "glm-team",
+        "--approve", prepared["manifest_hash"],
+    ]) == 2
+    assert "does not match the reviewed manifest" in capsys.readouterr().err
+
+
+def test_research_cli_uses_approved_immutable_profile_during_construction(
+    tmp_path, monkeypatch, capsys
+):
+    from quorum.providers.profiles import make_user_profile, write_user_profiles
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    config = tmp_path / "config" / "quorum" / "providers.json"
+    # Use direct Z.AI with a synthetic builder while retaining the
+    # immutable-profile race shape.
+    approved = make_user_profile("glm-safe", "zai", "glm-5.1")
+    write_user_profiles([approved], config)
+    source = tmp_path / "source.txt"
+    source.write_text("evidence", encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    assert cli.main([
+        "research", "q", "--file", str(source), "--provider", approved.id,
+        "--prepare", str(manifest),
+    ]) == 0
+    prepared = json.loads(capsys.readouterr().out)
+    seen = []
+    def racing_builder(profile, **kwargs):
+        seen.append((profile.provider_id, profile.model))
+        write_user_profiles([
+            make_user_profile("glm-safe", "zai", "changed-after-compare")
+        ], config)
+        return GroundedModel(profile.id, [])
+    monkeypatch.setattr(remote, "build_remote_model_from_profile", racing_builder)
+    assert cli.main([
+        "research", "q", "--manifest", str(manifest), "--provider", approved.id,
+        "--approve", prepared["manifest_hash"],
+    ]) == 0
+    assert seen == [("zai", "glm-5.1")]

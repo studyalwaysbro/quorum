@@ -26,6 +26,7 @@ class Turn:
 class Transcript:
     question: str
     turns: list[Turn] = field(default_factory=list)
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def record(
         self,
@@ -41,7 +42,11 @@ class Transcript:
         return [t for t in self.turns if t.round == round]
 
     def to_dict(self) -> dict:
-        return {"question": self.question, "turns": [asdict(t) for t in self.turns]}
+        return {
+            "question": self.question,
+            "turns": [asdict(t) for t in self.turns],
+            "meta": self.meta,
+        }
 
     def to_json(self, indent: int = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
@@ -49,7 +54,7 @@ class Transcript:
     @classmethod
     def from_json(cls, text: str) -> "Transcript":
         data = json.loads(text)
-        t = cls(question=data["question"])
+        t = cls(question=data["question"], meta=dict(data.get("meta", {})))
         t.turns = [
             Turn(
                 round=turn["round"],

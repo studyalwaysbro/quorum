@@ -166,6 +166,8 @@ def _blind_section(transcript, votes, confidences) -> str:
     cards = []
     for turn in turns:
         badges = []
+        if turn.meta.get("remote_identity"):
+            badges.append(_badge(_identity_text(turn)))
         if turn.model in votes:
             badges.append(_badge(f"vote: {votes[turn.model]}"))
         if turn.model in confidences and confidences[turn.model] is not None:
@@ -185,14 +187,35 @@ def _turn_section(title: str, turns, section_class: str = "") -> str:
         return ""
     panels = []
     for turn in turns:
+        identity = (
+            f"<div class=\"badges\">{_badge(_identity_text(turn))}</div>"
+            if turn.meta.get("remote_identity") else ""
+        )
         panels.append(
             "<article class=\"panel\">"
             f"<h3>{_e(turn.model)}</h3>"
+            f"{identity}"
             f"<div class=\"pre\">{_e(turn.response)}</div>"
             "</article>"
         )
     klass = f" class=\"{section_class}\"" if section_class else ""
     return f"<section{klass}><h2>{_e(title)}</h2>{''.join(panels)}</section>"
+
+
+def _identity_text(turn) -> str:
+    identity = turn.meta.get("remote_identity", {})
+    route = identity.get("routing_requested")
+    route_text = ""
+    if route:
+        only = ",".join(route.get("only", []))
+        route_text = f"; upstream requested {only}; routing unverified"
+    return (
+        f"{identity.get('provider', 'remote')} / requested "
+        f"{identity.get('requested_model', 'unknown')} / provider reported "
+        f"{identity.get('provider_reported_model', 'unknown')} / identity unverified; "
+        f"reasoning {identity.get('reasoning_requested', 'unknown')} requested/unverified"
+        f"{route_text}"
+    )
 
 
 def _revote_section(transcript, votes, revotes, confidences, flips) -> str:

@@ -4,6 +4,19 @@
 
 ### Added
 
+- Added secure declarative bring-your-own-model profiles for audited OpenAI,
+  DeepSeek, xAI, Kimi, Z.AI/GLM, OpenRouter, and loopback-only Ollama adapters.
+  Profiles are mode-`0600`, strict-schema, non-executable configuration with no
+  key values, endpoints, headers, hooks, tools, or automatic discovery.
+- Added `quorum provider list|path|add|remove`, `remote:PROFILE` seats for normal
+  CLI councils behind `--allow-remote-egress`, and GUI Remote Profiles mode with
+  exact-recipient disclosure and confirmation. OpenRouter profiles require a
+  pinned upstream and request no fallback, parameter support, denied data
+  collection, and ZDR; these provider controls are labeled unverified.
+- Added exact provider-reported model equality checks, compiled endpoint/trust/
+  protocol snapshots, recipient-round disclosure, reasoning-honesty metadata,
+  and immutable egress snapshot hashes bound into version-2 attachment manifests.
+
 - Added secure attachment research for CLI and the local GUI. Supported inputs
   are bounded TXT/Markdown, CSV/TSV, JSON, text PDFs, and OCR-ready
   PNG/JPEG/WebP images. Local extraction performs strict type/cap checks,
@@ -26,6 +39,10 @@
   transcript dumps cannot hitchhike into a broad commit.
 
 ### Fixed
+
+- Disabled ambient HTTP proxy handling for credential-bearing remote calls,
+  required JSON response content types, hardened local Host/Origin validation,
+  and replaced raw SSE exception strings with secret-safe public failures.
 
 - Pinned the reflexive `~/.local/bin/quorum` Codex council seat to
   `gpt-5.6-sol` with `model_reasoning_effort=\"xhigh\"` and corrected the
@@ -53,6 +70,23 @@
   clearing the prefilled demo labels before a different question can reuse them.
 
 ### Verification
+
+- Ran the full project suite: `200 passed`; the only warning is the existing
+  Starlette/httpx TestClient deprecation warning.
+- Validated browser JavaScript syntax, compiled the package, built a wheel with
+  `uv build`, installed it into a clean temporary virtual environment, and ran
+  the packaged `quorum provider list` / CLI help smoke tests.
+- Ran three independent post-implementation security/product/adversarial review
+  passes. Their blockers drove loopback attachment exclusion, immutable-profile
+  construction, descriptor-bound config reads, cached-consent fingerprints,
+  active-key output redaction, honest requested/unverified identity language,
+  and exact recipient-round receipts. Final verdicts were release-approved.
+- Added adversarial profile and remote-routing tests covering schema/duplicate
+  key/control-character attacks, mode/owner/symlink enforcement, built-in
+  shadowing, credential canaries, response-model spoofing, OpenRouter fallback
+  and privacy policy, Ollama Authorization exclusion, proxy poisoning defense,
+  profile/manifest TOCTOU, regular-council consent, DNS-rebinding Host headers,
+  and secret-safe streamed errors.
 
 - Ran focused attachment, remote-adapter, CLI, and web abuse tests, including
   spoofed types, symlinks, active PDFs, secret redaction, consent gates,

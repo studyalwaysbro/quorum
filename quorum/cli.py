@@ -52,7 +52,7 @@ def _parser() -> argparse.ArgumentParser:
         "--persona",
     ):
         ask.add_argument(flag)
-    for flag in ("--revote", "--quiet"):
+    for flag in ("--revote", "--quiet", "--allow-remote-egress"):
         ask.add_argument(flag, action="store_true")
     ask.add_argument("--seed", type=int, default=0)
     ask.add_argument("--timeout", type=float, default=600)
@@ -65,7 +65,7 @@ def _parser() -> argparse.ArgumentParser:
     research.add_argument("--file", action="append", default=[], dest="files")
     research.add_argument(
         "--provider", action="append", required=True,
-        help="allowlisted remote provider: openai, deepseek, or xai (repeatable)",
+        help="installed audited provider profile id (repeatable)",
     )
     research.add_argument("--prepare", metavar="MANIFEST", help="extract/redact locally and write a review manifest; no provider call")
     research.add_argument("--manifest", help="reviewed manifest to execute")
@@ -81,6 +81,27 @@ def _parser() -> argparse.ArgumentParser:
     research.add_argument("--json", help="write the attachment-safe Claim Ledger JSON (mode 0600)")
     research.add_argument("--timeout", type=float, default=120)
     research.set_defaults(func=_research)
+
+    provider = sub.add_parser("provider", help="manage declarative remote model profiles")
+    provider_sub = provider.add_subparsers(dest="provider_command", required=True)
+    provider_list = provider_sub.add_parser("list", help="list safe provider metadata")
+    provider_list.set_defaults(func=_provider_list)
+    provider_path = provider_sub.add_parser("path", help="print the local profile config path")
+    provider_path.set_defaults(func=_provider_path)
+    provider_add = provider_sub.add_parser("add", help="install a model profile on an audited adapter")
+    provider_add.add_argument("profile_id")
+    provider_add.add_argument("--provider", required=True,
+                              choices=("openai", "deepseek", "xai", "kimi", "zai", "openrouter", "ollama"))
+    provider_add.add_argument("--model", required=True)
+    provider_add.add_argument("--label")
+    provider_add.add_argument("--reasoning", default="provider_default",
+                              choices=("provider_default", "none", "high", "max", "xhigh"))
+    provider_add.add_argument("--upstream",
+                              help="required exact OpenRouter upstream slug; forbidden otherwise")
+    provider_add.set_defaults(func=_provider_add)
+    provider_remove = provider_sub.add_parser("remove", help="remove a user-installed profile")
+    provider_remove.add_argument("profile_id")
+    provider_remove.set_defaults(func=_provider_remove)
 
     health = sub.add_parser("health", help="summarize a vote store")
     health.add_argument("store")
@@ -105,10 +126,63 @@ def _parser() -> argparse.ArgumentParser:
 def _ask(args, model_factory) -> int:
     if not args.member:
         raise ValueError("at least one --member is required")
-    members = [_model(spec, args.timeout, model_factory) for spec in args.member]
-    skeptic = _model(args.skeptic, args.timeout, model_factory) if args.skeptic else None
+    remote_specs = [
+        spec for spec in [*args.member, *([args.skeptic] if args.skeptic else [])]
+        if spec.startswith("remote:")
+    ]
+    if remote_specs and not args.allow_remote_egress:
+        raise ValueError(
+            "remote profiles require --allow-remote-egress; the question and council outputs "
+            "will be shared across the selected providers"
+        )
+    from quorum.providers.remote import (
+        annotate_remote_transcript, build_remote_model_from_profile,
+        get_provider_profile, provider_snapshot,
+    )
+    resolved = {
+        _remote_profile_id(spec): get_provider_profile(_remote_profile_id(spec))
+        for spec in remote_specs
+    }
+    members = [
+        build_remote_model_from_profile(resolved[_remote_profile_id(spec)], timeout=args.timeout)
+        if spec.startswith("remote:") else _model(spec, args.timeout, model_factory)
+        for spec in args.member
+    ]
+    skeptic = (
+        build_remote_model_from_profile(resolved[_remote_profile_id(args.skeptic)], timeout=args.timeout)
+        if args.skeptic and args.skeptic.startswith("remote:")
+        else _model(args.skeptic, args.timeout, model_factory) if args.skeptic else None
+    )
     synthesizer = _by_name(members, args.synthesizer) if args.synthesizer else None
     labels = normalize_labels(args.labels.split(",")) if args.labels else None
+    remote_models = []
+    remote_snapshots = []
+    selected_synthesizer = synthesizer.name if synthesizer is not None else members[0].name
+    multi = len(members) > 1
+    has_labels = labels is not None
+    for index, (raw, model) in enumerate(zip(args.member, members)):
+        if raw.startswith("remote:"):
+            receives = ["blind"]
+            if has_labels:
+                receives.append("vote")
+            if multi:
+                receives.append("critique")
+            if has_labels and args.revote:
+                receives.append("revote")
+            if model.name == selected_synthesizer:
+                receives.append("synthesis")
+            remote_models.append(model)
+            remote_snapshots.append(provider_snapshot(
+                resolved[_remote_profile_id(raw)], receives=tuple(receives),
+            ))
+    if args.skeptic and args.skeptic.startswith("remote:"):
+        remote_models.append(skeptic)
+        remote_snapshots.append(provider_snapshot(
+            resolved[_remote_profile_id(args.skeptic)], receives=("adversarial",),
+        ))
+    if remote_snapshots:
+        print("quorum: approved remote egress receipt", file=sys.stderr)
+        print(json.dumps(remote_snapshots, ensure_ascii=False), file=sys.stderr)
     store = RecordStore(args.store) if args.store else None
 
     council = Council(
@@ -126,6 +200,8 @@ def _ask(args, model_factory) -> int:
         truth=args.truth,
         question_id=args.question_id,
     )
+    if remote_models:
+        annotate_remote_transcript(verdict.transcript, remote_models, remote_snapshots)
 
     if args.json:
         save(verdict.transcript.to_json(), args.json)
@@ -148,7 +224,10 @@ def _research(args, _model_factory) -> int:
     if not args.question.strip():
         raise ValueError("research question must be non-empty")
 
-    from quorum.providers.remote import build_remote_model, get_remote_spec
+    from quorum.providers.remote import (
+        build_remote_model_from_profile, ensure_attachment_eligible,
+        get_provider_profile, provider_snapshot,
+    )
     from quorum.research.attachments import (
         combine_chunks,
         ingest_attachment_paths,
@@ -168,13 +247,19 @@ def _research(args, _model_factory) -> int:
     providers = list(dict.fromkeys(args.provider))
     if len(providers) != len(args.provider):
         raise ValueError("duplicate --provider values are not allowed")
+    profiles = []
     for provider in providers:
-        get_remote_spec(provider)  # fail before reading any file or key
+        profile = get_provider_profile(provider)
+        ensure_attachment_eligible(profile)
+        profiles.append(profile)  # fail before reading any file or key
     model_overrides = _provider_models(args.model, providers)
 
     provider_manifest = [
-        {"id": provider, "model": model_overrides.get(provider) or get_remote_spec(provider).default_model}
-        for provider in providers
+        provider_snapshot(
+            profile, model=model_overrides.get(profile.id),
+            receives=("grounded_blind", "fact_check") if index == 0 else ("grounded_blind",),
+        )
+        for index, profile in enumerate(profiles)
     ]
 
     if args.prepare:
@@ -223,10 +308,10 @@ def _research(args, _model_factory) -> int:
     question = manifest["question"]
     print(f"quorum: approved manifest {manifest['manifest_hash']} for {', '.join(providers)}", file=sys.stderr)
     members = [
-        build_remote_model(
-            provider, model=model_overrides.get(provider), timeout=args.timeout
+        build_remote_model_from_profile(
+            profile, model=model_overrides.get(profile.id), timeout=args.timeout
         )
-        for provider in providers
+        for profile in profiles
     ]
     verdict = run_research(members, question, chunks)
     rendered = json.dumps(verdict.ledger.to_dict(), indent=2, ensure_ascii=False)
@@ -248,6 +333,55 @@ def _provider_models(values: list[str], providers: list[str]) -> dict[str, str]:
             raise ValueError(f"invalid or duplicate --model override for {provider}")
         overrides[provider] = model
     return overrides
+
+
+def _provider_list(args, _model_factory) -> int:
+    from quorum.providers.remote import remote_capabilities
+
+    print(json.dumps(remote_capabilities(), indent=2, ensure_ascii=False))
+    return 0
+
+
+def _provider_path(args, _model_factory) -> int:
+    from quorum.providers.profiles import config_path
+
+    print(config_path())
+    return 0
+
+
+def _provider_add(args, _model_factory) -> int:
+    from quorum.providers.profiles import add_user_profile, make_user_profile
+    from quorum.providers.remote import get_provider_profile, get_remote_spec
+
+    get_remote_spec(args.provider)
+    try:
+        get_provider_profile(args.profile_id)
+    except KeyError:
+        pass
+    else:
+        raise ValueError(f"provider profile already exists: {args.profile_id}")
+    profile = make_user_profile(
+        args.profile_id, args.provider, args.model, label=args.label,
+        reasoning=args.reasoning, upstream=args.upstream,
+    )
+    target = add_user_profile(profile)
+    print(json.dumps({
+        "installed": profile.id, "provider": profile.provider_id,
+        "model": profile.model, "config": str(target),
+        "credential_stored": False,
+    }, indent=2))
+    return 0
+
+
+def _provider_remove(args, _model_factory) -> int:
+    from quorum.providers.remote import builtin_profiles
+    from quorum.providers.profiles import remove_user_profile
+
+    if args.profile_id in {profile.id for profile in builtin_profiles()}:
+        raise ValueError("built-in provider profiles cannot be removed")
+    target = remove_user_profile(args.profile_id)
+    print(json.dumps({"removed": args.profile_id, "config": str(target)}, indent=2))
+    return 0
 
 
 def _write_private(path: str, text: str) -> None:
@@ -324,6 +458,8 @@ def _auth_doctor(args, _model_factory) -> int:
 
 
 def _model(spec: str, timeout: float, factory):
+    if spec.startswith("remote:"):
+        raise ValueError("remote profiles must use the immutable council resolution path")
     if "=" not in spec:
         return _catalog_model(spec, timeout, factory)
 
@@ -339,6 +475,13 @@ def _model(spec: str, timeout: float, factory):
         raise ValueError(f"{name} argv must be non-empty")
     prompt_transport = _catalog_prompt_transport(argv)
     return _call_model_factory(factory, name, argv, timeout, prompt_transport)
+
+
+def _remote_profile_id(spec: str) -> str:
+    profile_id = spec.removeprefix("remote:").strip()
+    if not profile_id:
+        raise ValueError("remote member must look like remote:PROFILE")
+    return profile_id
 
 
 def _catalog_model(model_id: str, timeout: float, factory):
@@ -427,6 +570,13 @@ def _plain_replay(transcript: Transcript) -> str:
     lines = [f"question: {transcript.question}"]
     for turn in transcript.turns:
         lines.extend(["", f"[{turn.round}] {turn.model}", turn.response])
+        identity = turn.meta.get("remote_identity")
+        if identity:
+            lines.append(
+                "identity: "
+                f"{identity['provider']} / requested {identity['requested_model']} / "
+                f"provider reported {identity['provider_reported_model']} / unverified"
+            )
     return "\n".join(lines)
 
 

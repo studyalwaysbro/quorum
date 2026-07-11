@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from quorum.web.server import app  # noqa: E402
 
-client = TestClient(app)
+client = TestClient(app, base_url="http://127.0.0.1:8000")
 CSRF = {"X-Quorum-CSRF": "1"}
 SOURCE = (b"Photosynthesis converts light into chemical energy in plants.\n\n"
           b"Mitochondria are the powerhouse of the cell.")
@@ -151,6 +151,18 @@ def test_research_bans_agentic_local_models():
     assert not (used & agentic_ids), "agentic models must never be used on the research endpoint"
 
 
+def test_research_rejects_loopback_ollama_before_storing_source():
+    from quorum.web import server
+    before = set(server._RESEARCH_RUNS)
+    response = client.post(
+        "/api/research-runs", headers=CSRF,
+        data={"question": "q", "mode": "remote", "providers": "ollama"}, files=_txt(),
+    )
+    assert response.status_code == 400
+    assert "not eligible for attachment research" in response.text
+    assert set(server._RESEARCH_RUNS) == before
+
+
 def test_remote_research_requires_reviewed_hash_approval(monkeypatch):
     import quorum.web.server as server
 
@@ -174,8 +186,8 @@ def test_remote_research_requires_reviewed_hash_approval(monkeypatch):
     assert wrong.status_code == 400
 
     monkeypatch.setattr(
-        server, "build_remote_model",
-        lambda provider_id, **kwargs: server.demo_research_member(provider_id, 0),
+        server, "build_remote_model_from_profile",
+        lambda profile, **kwargs: server.demo_research_member(profile.id, 0),
     )
     approved = client.post(
         f"/api/research-runs/{body['run_id']}/approve", headers=CSRF,
@@ -241,3 +253,24 @@ def test_gui_remote_fact_check_budget_matches_pipeline(monkeypatch):
     assert len(checks) == MAX_POOLED_CLAIMS == 24
     verdict_events = [line for line in events if '"type": "verdict"' in line]
     assert len(verdict_events) == MAX_POOLED_CLAIMS
+
+
+def test_gui_rejects_profile_drift_before_model_construction(tmp_path, monkeypatch):
+    import quorum.web.server as server
+    from quorum.providers.profiles import make_user_profile, write_user_profiles
+    from quorum.providers.remote import get_provider_profile, provider_snapshot
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    config = tmp_path / "quorum" / "providers.json"
+    write_user_profiles([
+        make_user_profile("glm-gui", "zai", "glm-5.1")
+    ], config)
+    prepared = [provider_snapshot(get_provider_profile("glm-gui"))]
+    write_user_profiles([
+        make_user_profile("glm-gui", "zai", "glm-5.1-new")
+    ], config)
+    called = []
+    monkeypatch.setattr(server, "build_remote_model_from_profile", lambda *args, **kwargs: called.append(args))
+    with pytest.raises(ValueError, match="changed after approval"):
+        server._build_research_models("remote", ["glm-gui"], prepared)
+    assert called == []
