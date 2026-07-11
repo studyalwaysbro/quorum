@@ -59,6 +59,9 @@ def test_capabilities_lists_models_no_keys():
     assert "Atlas" in r["demo"]["all_members"]
     ids = {m["id"] for m in r["local"]}
     assert {"claude", "gemini", "grok"} <= ids
+    gemini = next(m for m in r["local"] if m["id"] == "gemini")
+    assert gemini["enabled_by_default"] is False
+    assert "retired" in gemini["note"].lower()
     # never leak a key-shaped field
     assert "key" not in json.dumps(r).lower().replace("skeptic", "")
 

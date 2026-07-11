@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import json
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -24,7 +26,7 @@ def main(argv: list[str] | None = None, *, model_factory=CLIModel) -> int:
         return args.func(args, model_factory)
     except SystemExit as exc:
         return int(exc.code or 0)
-    except (ValueError, OSError, KeyError, TypeError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, RuntimeError) as exc:
         print(f"quorum: {exc}", file=sys.stderr)
         return 2
 
@@ -55,6 +57,30 @@ def _parser() -> argparse.ArgumentParser:
     ask.add_argument("--seed", type=int, default=0)
     ask.add_argument("--timeout", type=float, default=600)
     ask.set_defaults(func=_ask)
+
+    research = sub.add_parser(
+        "research", help="analyze local attachments with stateless, tool-free APIs"
+    )
+    research.add_argument("question")
+    research.add_argument("--file", action="append", default=[], dest="files")
+    research.add_argument(
+        "--provider", action="append", required=True,
+        help="allowlisted remote provider: openai, deepseek, or xai (repeatable)",
+    )
+    research.add_argument("--prepare", metavar="MANIFEST", help="extract/redact locally and write a review manifest; no provider call")
+    research.add_argument("--manifest", help="reviewed manifest to execute")
+    research.add_argument("--approve", metavar="SHA256", help="exact hash printed by --prepare after review")
+    research.add_argument(
+        "--allow-sensitive", action="store_true",
+        help="send detected secrets without automatic redaction (dangerous, per-run only)",
+    )
+    research.add_argument(
+        "--model", action="append", default=[], metavar="PROVIDER=MODEL",
+        help="override a provider's allowlisted default model",
+    )
+    research.add_argument("--json", help="write the attachment-safe Claim Ledger JSON (mode 0600)")
+    research.add_argument("--timeout", type=float, default=120)
+    research.set_defaults(func=_research)
 
     health = sub.add_parser("health", help="summarize a vote store")
     health.add_argument("store")
@@ -112,6 +138,145 @@ def _ask(args, model_factory) -> int:
     return 0
 
 
+def _research(args, _model_factory) -> int:
+    """Attachment analysis that never invokes a local/tool-capable CLI.
+
+    Extracted source text is redacted locally by default, then sent only to
+    fixed-host stateless API adapters. The output is a Claim Ledger, not a raw
+    transcript, so source-bearing prompts are not persisted.
+    """
+    if not args.question.strip():
+        raise ValueError("research question must be non-empty")
+
+    from quorum.providers.remote import build_remote_model, get_remote_spec
+    from quorum.research.attachments import (
+        combine_chunks,
+        ingest_attachment_paths,
+        read_attachment_path,
+        redact_text,
+        scan_advisories,
+    )
+    from quorum.research.manifest import (
+        build_manifest,
+        manifest_chunks,
+        manifest_preview,
+        validate_manifest,
+    )
+    from quorum.research.pipeline import run_research
+    from quorum.research.schema import SourceChunk
+
+    providers = list(dict.fromkeys(args.provider))
+    if len(providers) != len(args.provider):
+        raise ValueError("duplicate --provider values are not allowed")
+    for provider in providers:
+        get_remote_spec(provider)  # fail before reading any file or key
+    model_overrides = _provider_models(args.model, providers)
+
+    provider_manifest = [
+        {"id": provider, "model": model_overrides.get(provider) or get_remote_spec(provider).default_model}
+        for provider in providers
+    ]
+
+    if args.prepare:
+        if not args.files or args.manifest or args.approve:
+            raise ValueError("--prepare requires --file and cannot be combined with --manifest/--approve")
+        results = ingest_attachment_paths(args.files)
+        question_findings = scan_advisories(args.question)
+        secret_findings = sum(
+            advisory.kind != "prompt_injection_language"
+            for result in results for advisory in result.advisories
+        ) + sum(a.kind != "prompt_injection_language" for a in question_findings)
+        injection_hints = sum(
+            advisory.kind == "prompt_injection_language"
+            for result in results for advisory in result.advisories
+        ) + sum(a.kind == "prompt_injection_language" for a in question_findings)
+        raw_chunks = combine_chunks(results)
+        chunks = raw_chunks if args.allow_sensitive else [
+            SourceChunk(chunk.id, redact_text(chunk.text), chunk.source) for chunk in raw_chunks
+        ]
+        question = args.question if args.allow_sensitive else redact_text(args.question, question_findings)
+        manifest = build_manifest(
+            question, chunks, provider_manifest, files=len(results),
+            secret_findings=secret_findings, injection_hints=injection_hints,
+        )
+        _write_private(args.prepare, json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+        summary = {
+            key: manifest[key] for key in (
+                "manifest_hash", "providers", "files", "secret_findings_redacted", "injection_hints"
+            )
+        }
+        summary["chunks"] = len(manifest["chunks"])
+        summary["preview"] = manifest_preview(manifest)
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        print("quorum: no content was sent; review the manifest and preview before approval", file=sys.stderr)
+        return 0
+
+    if args.files or args.prepare or not args.manifest or not args.approve:
+        raise ValueError("execution requires --manifest FILE and --approve SHA256, with no --file")
+    _, manifest_bytes = read_attachment_path(args.manifest, max_bytes=1_500_000)
+    manifest = validate_manifest(json.loads(manifest_bytes.decode("utf-8")))
+    if args.approve != manifest["manifest_hash"]:
+        raise ValueError("--approve does not match the reviewed manifest hash")
+    if manifest["question"] != args.question or manifest["providers"] != provider_manifest:
+        raise ValueError("question/provider/model selection does not match the reviewed manifest")
+    chunks = manifest_chunks(manifest)
+    question = manifest["question"]
+    print(f"quorum: approved manifest {manifest['manifest_hash']} for {', '.join(providers)}", file=sys.stderr)
+    members = [
+        build_remote_model(
+            provider, model=model_overrides.get(provider), timeout=args.timeout
+        )
+        for provider in providers
+    ]
+    verdict = run_research(members, question, chunks)
+    rendered = json.dumps(verdict.ledger.to_dict(), indent=2, ensure_ascii=False)
+    if args.json:
+        _write_private(args.json, rendered + "\n")
+    print(rendered)
+    return 0
+
+
+def _provider_models(values: list[str], providers: list[str]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError("--model must look like PROVIDER=MODEL")
+        provider, model = (part.strip() for part in value.split("=", 1))
+        if provider not in providers:
+            raise ValueError(f"--model provider was not selected: {provider}")
+        if not model or provider in overrides:
+            raise ValueError(f"invalid or duplicate --model override for {provider}")
+        overrides[provider] = model
+    return overrides
+
+
+def _write_private(path: str, text: str) -> None:
+    target = Path(path)
+    if target.exists() or target.is_symlink():
+        info = target.lstat()
+        if not target.is_file() or target.is_symlink():
+            raise ValueError(f"refusing non-regular or symlink output: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}.tmp-{os.getpid()}-{os.urandom(6).hex()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temp, flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, target)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _health(args, _model_factory) -> int:
     path = Path(args.store)
     if not path.exists():
@@ -160,7 +325,8 @@ def _auth_doctor(args, _model_factory) -> int:
 
 def _model(spec: str, timeout: float, factory):
     if "=" not in spec:
-        raise ValueError("member specs must look like name=argv")
+        return _catalog_model(spec, timeout, factory)
+
     name, raw_argv = spec.split("=", 1)
     name = name.strip()
     if not name:
@@ -173,6 +339,23 @@ def _model(spec: str, timeout: float, factory):
         raise ValueError(f"{name} argv must be non-empty")
     prompt_transport = _catalog_prompt_transport(argv)
     return _call_model_factory(factory, name, argv, timeout, prompt_transport)
+
+
+def _catalog_model(model_id: str, timeout: float, factory):
+    from quorum.providers import get_spec
+
+    model_id = model_id.strip()
+    if not model_id:
+        raise ValueError("member specs must look like name=argv or a catalog id")
+    try:
+        spec = get_spec(model_id)
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown catalog model id: {model_id}; use name=argv for custom commands"
+        ) from exc
+    return _call_model_factory(
+        factory, spec.id, list(spec.command), timeout, spec.prompt_transport
+    )
 
 
 def _catalog_prompt_transport(argv: list[str]) -> str:

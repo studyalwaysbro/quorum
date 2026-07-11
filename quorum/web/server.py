@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from quorum.adapters import Model
 from quorum.providers import LOCAL_CATALOG, Audition, build_local_model, get_spec, probe
 from quorum.providers.catalog import LocalModelSpec
+from quorum.providers.remote import build_remote_model, get_remote_spec, remote_capabilities
 from quorum.rounds import (
     adversarial_round,
     blind_round,
@@ -39,8 +40,18 @@ from quorum.rounds import (
     synthesis_round,
 )
 from quorum.personas import get_persona, persona_catalog
-from quorum.research.ingest import ingest_uploads
+from quorum.research.attachments import (
+    MAX_FILE_BYTES as ATTACHMENT_FILE_BYTES,
+    MAX_FILES as ATTACHMENT_MAX_FILES,
+    MAX_TOTAL_BYTES as ATTACHMENT_TOTAL_BYTES,
+    combine_chunks,
+    ingest_attachment_bytes,
+    redact_text,
+    scan_advisories,
+)
 from quorum.research.ledger import ClaimLedger
+from quorum.research.manifest import build_manifest, manifest_preview
+from quorum.research.pipeline import pool_claims_bounded
 from quorum.research.rounds import fact_check, grounded_blind
 from quorum.scorecard import agreement_delta, delta_to_dict, stage_agreement
 from quorum.transcript import Transcript
@@ -58,6 +69,16 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 LOCAL_PROBE_TIMEOUT = 45
 
 app = FastAPI(title="Quorum", description="Watch a multi-model council deliberate")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 # In-memory, one-shot run registry: run_id -> spec. Never persisted.
 _RUNS: dict[str, dict] = {}
@@ -96,7 +117,8 @@ def capabilities() -> dict:
             "available": spec.available, "note": spec.note,
         }
         local.append(entry)
-    return {"demo": default_demo_roster(), "local": local, "skeptic_name": SKEPTIC_NAME,
+    return {"demo": default_demo_roster(), "local": local,
+            "remote": remote_capabilities(), "skeptic_name": SKEPTIC_NAME,
             "personas": persona_catalog()}
 
 
@@ -354,7 +376,6 @@ _RESEARCH_TTL = 600                  # seconds a pending run lives
 _MAX_PENDING_RESEARCH = 8
 _GLOBAL_SOURCE_CHAR_CAP = 600_000    # across all stored research runs
 _QUESTION_CHAR_CAP = 2_000
-from quorum.research.ingest import MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES  # noqa: E402
 
 
 _research_claim_lock = threading.Lock()
@@ -396,7 +417,7 @@ async def create_research_run(request: Request) -> dict:
         declared = int(content_length)
     except ValueError:
         raise HTTPException(status_code=400, detail="bad Content-Length")
-    if declared > MAX_TOTAL_BYTES + 64 * 1024:         # body cap + form overhead
+    if declared > ATTACHMENT_TOTAL_BYTES + 128 * 1024:  # body cap + form overhead
         raise HTTPException(status_code=413, detail="upload too large")
     media = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if media != "multipart/form-data":
@@ -407,49 +428,123 @@ async def create_research_run(request: Request) -> dict:
     if len(_RESEARCH_RUNS) >= _MAX_PENDING_RESEARCH:
         raise HTTPException(status_code=429, detail="too many pending research runs; retry shortly")
 
-    form = await request.form(max_files=MAX_FILES, max_fields=8, max_part_size=MAX_FILE_BYTES)
+    form = await request.form(
+        max_files=ATTACHMENT_MAX_FILES, max_fields=12,
+        max_part_size=ATTACHMENT_FILE_BYTES,
+    )
     question = str(form.get("question", "")).strip()
     if not question:
         raise HTTPException(status_code=400, detail="a question is required")
     if len(question) > _QUESTION_CHAR_CAP:
         raise HTTPException(status_code=400, detail="question too long")
-    # Demo-only for now: running local CLIs over UNTRUSTED uploads isn't sandboxed
-    # (a hostile document could prompt-inject a tool-running agent). Deliberation
-    # mode still uses local models; research uploads do not.
-    if str(form.get("mode", "demo")) != "demo":
+    question_advisories = scan_advisories(question)
+    question = redact_text(question, question_advisories)
+    mode = str(form.get("mode", "demo"))
+    if mode not in ("demo", "remote"):
         raise HTTPException(
             status_code=400,
-            detail="research mode is demo-only for now (local execution over untrusted uploads is not yet sandboxed)",
+            detail="attachments support demo or stateless remote mode; local agentic CLIs are blocked",
         )
-    mode = "demo"
+    provider_ids: list[str] = []
+    if mode == "remote":
+        provider_ids = [p.strip() for p in str(form.get("providers", "")).split(",") if p.strip()]
+        if not provider_ids or len(provider_ids) != len(set(provider_ids)):
+            raise HTTPException(status_code=400, detail="select one or more unique remote providers")
+        configured = {item["id"]: item["configured"] for item in remote_capabilities()}
+        for provider_id in provider_ids:
+            try:
+                get_remote_spec(provider_id)
+            except KeyError:
+                raise HTTPException(status_code=400, detail=f"unknown remote provider: {provider_id}")
+            if not configured.get(provider_id):
+                raise HTTPException(status_code=400, detail=f"remote provider is not configured: {provider_id}")
 
     files = []
-    remaining = MAX_TOTAL_BYTES
+    remaining = ATTACHMENT_TOTAL_BYTES
     for value in form.getlist("files"):
         if not hasattr(value, "read"):                 # ignore non-file form fields
             continue
-        data = await _read_capped(value, MAX_FILE_BYTES, remaining)
+        data = await _read_capped(value, ATTACHMENT_FILE_BYTES, remaining)
         remaining -= len(data)
         files.append((value.filename, data))
     if not files:
-        raise HTTPException(status_code=400, detail="upload at least one .txt or .md file")
+        raise HTTPException(status_code=400, detail="upload at least one supported attachment")
 
     try:
-        chunks = ingest_uploads(files)
+        results = [ingest_attachment_bytes(name, data) for name, data in files]
+        chunks = combine_chunks(results)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    secret_findings = sum(
+        advisory.kind != "prompt_injection_language"
+        for result in results for advisory in result.advisories
+    ) + sum(a.kind != "prompt_injection_language" for a in question_advisories)
+    injection_hints = sum(
+        advisory.kind == "prompt_injection_language"
+        for result in results for advisory in result.advisories
+    ) + sum(a.kind == "prompt_injection_language" for a in question_advisories)
+    # Web research always redacts locally. There is intentionally no remembered
+    # or blanket browser override for likely secrets.
+    from quorum.research.schema import SourceChunk
+    chunks = [SourceChunk(c.id, redact_text(c.text), c.source) for c in chunks]
+
+    provider_manifest = [
+        {"id": provider_id, "model": get_remote_spec(provider_id).default_model}
+        for provider_id in provider_ids
+    ]
+    manifest = build_manifest(
+        question, chunks, provider_manifest, files=len(results),
+        secret_findings=secret_findings, injection_hints=injection_hints,
+    )
 
     source_chars = sum(len(c.text) for c in chunks)
-    if _stored_source_chars() + source_chars > _GLOBAL_SOURCE_CHAR_CAP:
-        raise HTTPException(status_code=429, detail="server source memory busy; retry shortly")
-
     run_id = secrets.token_urlsafe(18)
-    _RESEARCH_RUNS[run_id] = {
-        "question": question, "mode": mode, "chunks": chunks,
-        "source_chars": source_chars, "created_at": now,
-        "expires_at": now + _RESEARCH_TTL, "claimed": False,
+    with _research_claim_lock:
+        _evict_expired_research(now)
+        if len(_RESEARCH_RUNS) >= _MAX_PENDING_RESEARCH:
+            raise HTTPException(status_code=429, detail="too many pending research runs; retry shortly")
+        if _stored_source_chars() + source_chars > _GLOBAL_SOURCE_CHAR_CAP:
+            raise HTTPException(status_code=429, detail="server source memory busy; retry shortly")
+        _RESEARCH_RUNS[run_id] = {
+            "question": question, "mode": mode, "chunks": chunks,
+            "providers": provider_ids,
+            "provider_models": {item["id"]: item["model"] for item in provider_manifest},
+            "manifest_hash": manifest["manifest_hash"],
+            "approved": mode == "demo",
+            "source_chars": source_chars, "created_at": now,
+            "expires_at": now + _RESEARCH_TTL, "claimed": False,
+        }
+    return {
+        "run_id": run_id, "chunks": len(chunks), "source_chars": source_chars,
+        "files": len(results), "secret_findings_redacted": secret_findings,
+        "injection_hints": injection_hints,
+        "providers": provider_manifest, "manifest_hash": manifest["manifest_hash"],
+        "preview": manifest_preview(manifest), "manifest": manifest,
+        "requires_approval": mode == "remote",
     }
-    return {"run_id": run_id, "chunks": len(chunks), "source_chars": source_chars}
+
+
+class ResearchApproval(BaseModel):
+    manifest_hash: str
+
+
+@app.post("/api/research-runs/{run_id}/approve")
+def approve_research_run(run_id: str, req: ResearchApproval, request: Request) -> dict:
+    _require_local_post(request)
+    now = time.monotonic()
+    with _research_claim_lock:
+        _evict_expired_research(now)
+        spec = _RESEARCH_RUNS.get(run_id)
+        if spec is None or spec["claimed"] or spec["expires_at"] < now:
+            raise HTTPException(status_code=404, detail="unknown, expired, or consumed run")
+        if spec["mode"] != "remote":
+            raise HTTPException(status_code=400, detail="demo research does not require approval")
+        if req.manifest_hash != spec["manifest_hash"]:
+            raise HTTPException(status_code=400, detail="prepared manifest changed or hash mismatched")
+        if spec["approved"]:
+            raise HTTPException(status_code=409, detail="run was already approved")
+        spec["approved"] = True
+    return {"approved": True, "manifest_hash": req.manifest_hash}
 
 
 @app.get("/api/research-runs/{run_id}/events")
@@ -460,37 +555,56 @@ def research_run_events(run_id: str) -> StreamingResponse:
         spec = _RESEARCH_RUNS.get(run_id)
         if spec is None or spec["claimed"] or spec["expires_at"] < now:
             raise HTTPException(status_code=404, detail="unknown, expired, or already-consumed run")
+        if not spec.get("approved"):
+            raise HTTPException(status_code=403, detail="review and approve the prepared manifest first")
         spec["claimed"] = True
     return StreamingResponse(
         research_events(spec, run_id),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no",
+                 "X-Content-Type-Options": "nosniff"},
     )
 
 
-def _build_research_models(mode: str):
-    """DEMO ONLY (fail closed). Running local CLIs over untrusted uploads is not
-    yet sandboxed, and 'non-agentic + passes audition' does not prove a CLI is
-    tool/workspace-disabled — so a hostile document never reaches a local model."""
-    if mode != "demo":
-        raise ValueError("local research is disabled (uploads run demo models only)")
-    members = [demo_research_member(n, i) for i, n in enumerate(["Atlas", "Beacon", "Cypher"])]
-    return members, demo_research_member("Vex", 9)
+def _build_research_models(
+    mode: str, provider_ids: list[str] | tuple[str, ...] = (),
+    provider_models: Optional[dict[str, str]] = None,
+):
+    """Build only demo stubs or stateless, tool-free fixed-host API models.
+
+    Local CLI models remain fail-closed: scrubbed environment variables do not
+    remove their filesystem/tool access and therefore are not an attachment
+    sandbox.
+    """
+    if mode == "demo":
+        members = [demo_research_member(n, i) for i, n in enumerate(["Atlas", "Beacon", "Cypher"])]
+        return members, demo_research_member("Vex", 9)
+    if mode == "remote" and provider_ids:
+        provider_models = provider_models or {}
+        members = [
+            build_remote_model(provider_id, model=provider_models.get(provider_id))
+            for provider_id in provider_ids
+        ]
+        return members, None
+    raise ValueError("local/agentic attachment research is disabled")
 
 
 def research_events(spec: dict, run_id: str):
     try:
         chunks, question, mode = spec["chunks"], spec["question"], spec["mode"]
         pace = 0.25 if mode == "demo" else 0.0
-        members, skeptic = _build_research_models(mode)
+        members, skeptic = _build_research_models(
+            mode, spec.get("providers", ()), spec.get("provider_models")
+        )
         t = Transcript(question=question)
 
         yield _sse({"type": "start", "question": question, "mode": mode,
-                    "chunks": len(chunks), "source": chunks[0].source if chunks else ""})
+                    "chunks": len(chunks), "files": len({c.source for c in chunks}),
+                    "providers": list(spec.get("providers", ()))})
 
         yield _sse({"type": "round", "round": "grounded_blind", "status": "running"})
         per_member = grounded_blind(members, question, chunks, t)
-        pooled = [c for m in members for c in per_member.get(m.name, [])]
+        pooled = pool_claims_bounded(per_member, members)
         for claim in pooled:
             yield _sse({"type": "claim", "claim": claim.to_dict()})
             if pace:

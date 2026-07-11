@@ -117,8 +117,8 @@ def test_expired_research_run_is_not_consumable():
 
 
 def test_oversize_file_rejected():
-    # Codex finding #3: per-file cap (bounded read or parser) rejects 600 KiB
-    big = b"a" * (600 * 1024)
+    # Per-file cap (bounded read or parser) rejects input above 5 MiB.
+    big = b"a" * (6 * 1024 * 1024)
     r = client.post("/api/research-runs", headers=CSRF,
                     data={"question": "q", "mode": "demo"},
                     files={"files": ("big.txt", big, "text/plain")})
@@ -149,3 +149,95 @@ def test_research_bans_agentic_local_models():
         return                                             # no non-agentic available -> refuses
     used = {m.name for m in members} | ({skeptic.name} if skeptic else set())
     assert not (used & agentic_ids), "agentic models must never be used on the research endpoint"
+
+
+def test_remote_research_requires_reviewed_hash_approval(monkeypatch):
+    import quorum.web.server as server
+
+    monkeypatch.setattr(server, "remote_capabilities", lambda: [
+        {"id": "deepseek", "label": "DeepSeek", "default_model": "deepseek-v4-pro", "configured": True}
+    ])
+    prepared = client.post(
+        "/api/research-runs", headers=CSRF,
+        data={"question": "q", "mode": "remote", "providers": "deepseek"}, files=_txt(),
+    )
+    assert prepared.status_code == 200, prepared.text
+    body = prepared.json()
+    assert body["requires_approval"] is True and body["preview"]
+    assert body["manifest"]["manifest_hash"] == body["manifest_hash"]
+    assert body["manifest"]["chunks"]
+    assert client.get(f"/api/research-runs/{body['run_id']}/events").status_code == 403
+    wrong = client.post(
+        f"/api/research-runs/{body['run_id']}/approve", headers=CSRF,
+        json={"manifest_hash": "0" * 64},
+    )
+    assert wrong.status_code == 400
+
+    monkeypatch.setattr(
+        server, "build_remote_model",
+        lambda provider_id, **kwargs: server.demo_research_member(provider_id, 0),
+    )
+    approved = client.post(
+        f"/api/research-runs/{body['run_id']}/approve", headers=CSRF,
+        json={"manifest_hash": body["manifest_hash"]},
+    )
+    assert approved.status_code == 200, approved.text
+    events = _events(body["run_id"])
+    assert events[0]["mode"] == "remote"
+    assert events[0]["providers"] == ["deepseek"]
+    assert any(event["type"] == "ledger" for event in events)
+
+
+def test_remote_upload_redacts_likely_secret_before_storage(monkeypatch):
+    import quorum.web.server as server
+
+    monkeypatch.setattr(server, "remote_capabilities", lambda: [
+        {"id": "openai", "label": "OpenAI", "default_model": "gpt-5.6-sol", "configured": True}
+    ])
+    credential_name = "_".join(("OPENAI", "API", "KEY"))
+    fake_secret = "sk" + chr(45) + "abcdefghijklmnopqr"
+    response = client.post(
+        "/api/research-runs", headers=CSRF,
+        data={"question": "q", "mode": "remote", "providers": "openai",
+              },
+        files=_txt(data=f"{credential_name}={fake_secret}".encode()),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["secret_findings_redacted"] >= 1
+    chunks = server._RESEARCH_RUNS[response.json()["run_id"]]["chunks"]
+    packet = "\n".join(chunk.text for chunk in chunks)
+    assert fake_secret not in packet
+    assert "[REDACTED:" in packet
+
+
+def test_gui_remote_fact_check_budget_matches_pipeline(monkeypatch):
+    import quorum.web.server as server
+    from quorum.adapters import CallableModel
+    from quorum.research.pipeline import MAX_POOLED_CLAIMS
+    from quorum.research.schema import Citation, Claim, SourceChunk
+
+    members = [CallableModel(name, lambda prompt: "unused") for name in ("A", "B", "C")]
+    per_member = {
+        member.name: [
+            Claim(f"{member.name}{i}", f"claim {i}", [Citation("C1", "source")], asserted_by=[member.name])
+            for i in range(40)
+        ]
+        for member in members
+    }
+    checks = []
+    monkeypatch.setattr(server, "_build_research_models", lambda *args, **kwargs: (members, None))
+    monkeypatch.setattr(server, "grounded_blind", lambda *args, **kwargs: per_member)
+
+    def checked(model, claim, chunks, transcript):
+        checks.append(claim.id)
+        claim.verdict = "Supported"
+        claim.citations[0].valid = True
+
+    monkeypatch.setattr(server, "fact_check", checked)
+    events = list(server.research_events({
+        "question": "q", "mode": "remote", "providers": ["openai"],
+        "chunks": [SourceChunk("C1", "source", "x.txt")],
+    }, "not-stored"))
+    assert len(checks) == MAX_POOLED_CLAIMS == 24
+    verdict_events = [line for line in events if '"type": "verdict"' in line]
+    assert len(verdict_events) == MAX_POOLED_CLAIMS

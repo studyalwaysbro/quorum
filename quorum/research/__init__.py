@@ -19,6 +19,15 @@ from quorum.research.retrieval import WholeContextRetriever
 from quorum.research.rounds import fact_check, grounded_blind
 from quorum.research.ledger import ClaimLedger, disposition_for
 from quorum.research.pipeline import ResearchVerdict, run_research
+from quorum.research.attachments import (
+    AttachmentResult,
+    Advisory,
+    combine_chunks,
+    ingest_attachment_bytes,
+    ingest_attachment_paths,
+    redact_text,
+    scan_advisories,
+)
 
 __all__ = [
     "SourceChunk",
@@ -34,4 +43,11 @@ __all__ = [
     "disposition_for",
     "ResearchVerdict",
     "run_research",
+    "AttachmentResult",
+    "Advisory",
+    "ingest_attachment_bytes",
+    "ingest_attachment_paths",
+    "combine_chunks",
+    "scan_advisories",
+    "redact_text",
 ]

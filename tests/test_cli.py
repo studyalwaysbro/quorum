@@ -118,11 +118,30 @@ def test_cli_uses_catalog_prompt_transport_for_known_arg_clis(capsys):
         return ScriptedModel(name)
 
     assert cli.main(
-        ["ask", "q?", "--member", "gemini=gemini -p"],
+        ["ask", "q?", "--member", "claude=claude -p"],
         model_factory=factory,
     ) == 0
-    assert seen["gemini"] == "arg"
-    assert capsys.readouterr().out == "final from gemini\n"
+    assert seen["claude"] == "arg"
+    assert capsys.readouterr().out == "final from claude\n"
+
+
+def test_cli_accepts_catalog_member_id_and_codex_skips_git_check(capsys):
+    seen = {}
+
+    def factory(name, argv, timeout, prompt_transport="stdin"):
+        del timeout
+        seen[name] = {"argv": argv, "prompt_transport": prompt_transport}
+        return ScriptedModel(name)
+
+    assert cli.main(
+        ["ask", "q?", "--member", "gpt-5.5"],
+        model_factory=factory,
+    ) == 0
+    assert seen["gpt-5.5"] == {
+        "argv": ["codex", "exec", "--skip-git-repo-check"],
+        "prompt_transport": "stdin",
+    }
+    assert capsys.readouterr().out == "final from gpt-5.5\n"
 
 
 def test_real_cli_invocation_with_python_member(tmp_path):

@@ -5,13 +5,17 @@ question and run them through a *structured deliberation* — not a naive
 fan-out, not a majority vote.
 
 ```python
-from quorum import Council, CLIModel
+from quorum import Council
+from quorum.providers import build_local_model
+
+deepseek = build_local_model("deepseek")
+gpt = build_local_model("gpt-5.5")
+grok = build_local_model("grok")
 
 council = Council(
-    members=[CLIModel("deepseek", ["deepseek"]),
-             CLIModel("gpt-5.5", ["codex", "--quiet"]),
-             CLIModel("gemini",  ["gemini", "-p"])],
-    skeptic=None,          # optional adversarial-only member
+    members=[deepseek, gpt],
+    skeptic=grok,          # adversarial-only member
+    synthesizer=deepseek,
     distiller=None,        # optional semantic consensus-map model
 )
 verdict = council.ask("Which sort fits a nearly-sorted 10k-element list?")
@@ -134,11 +138,11 @@ python -m quorum.web          # then open http://127.0.0.1:8000
 
 - **Demo mode** needs no API keys — keyless, round-aware stub models so the whole
   mechanic runs instantly for anyone who clones the repo.
-- **Local CLI mode** detects the allowlisted CLIs on the host (`claude`,
-  `gemini`, `grok`, `codex`, `deepseek`) and lets you pick which sit on the
-  council and which is the adversary. Each selected CLI must pass the audition
-  gate before it can run; agentic CLIs are off by default and require explicit
-  opt-in.
+- **Local CLI mode** detects the allowlisted CLIs on the host (`claude`, `grok`,
+  `codex`, `deepseek`, plus retired/quarantined entries such as `gemini`) and
+  lets you pick which sit on the council and which is the adversary. Each
+  selected CLI must pass the audition gate before it can run; agentic CLIs are
+  off by default and require explicit opt-in.
 
 The backend creates a run with CSRF-protected `POST /api/runs` and then streams
 over Server-Sent Events from `GET /api/runs/{run_id}/events`; prompts are not
@@ -148,7 +152,15 @@ placed in URLs. Download the full replayable transcript from the result panel.
 
 ## Research mode — ground a council in your document
 
-Open the **📄 Research** tab, drop a `.txt`/`.md` file, and ask a question. The
+Open the **📄 Research** tab, drop bounded text/Markdown, CSV/TSV, JSON, PDF, or
+PNG/JPEG/WebP files, and ask a question. PDFs are text-extracted; images use
+OCR, not general visual reasoning. Install optional parsers with
+`pip install -e ".[web,research]"` (OCR also needs the `tesseract` executable).
+Secure PDF/OCR extraction runs in a volume-free, no-network parser container.
+Build it once with `docker build -f docker/parser.Dockerfile -t
+quorum-parser:0.1.0 .`; those formats fail closed if the image/runtime is
+unavailable rather than parsing inside the credential-bearing Quorum process.
+The
 council reads the source, answers in **cited claims**, and an adversary
 **fact-checks each claim against the source**. The result is a **Claim Ledger**:
 
@@ -161,9 +173,34 @@ chunk, checked deterministically — so a claim can **never** be reported as
 supported on a fabricated quote, no matter what the model (or the fact-checker)
 says. That auditable refusal to overclaim is the point.
 
-Uploads are treated as untrusted content: validated by sniffing (not extension),
-capped, held in memory only, and run with **demo models only** — see
-[`SECURITY.md`](SECURITY.md). Download the full ledger as JSON from the result.
+Uploads are treated as untrusted content: types are sniffed, sizes/pages/pixels
+are capped, likely secrets are redacted locally, and active PDF content,
+archives, office files, symlinks, and special files are rejected. Demo mode is
+fully local. Real analysis uses only fixed-host, stateless, tool-free API calls
+after explicit per-run provider consent; uploaded content never reaches local
+agentic CLIs. Pattern scanning is defense-in-depth, not proof that a document is
+benign. See [`SECURITY.md`](SECURITY.md).
+
+The same secure path is available from the CLI:
+
+```bash
+# First set one provider credential in your environment:
+# DEEPSEEK_API_KEY, OPENAI_API_KEY, or XAI_API_KEY
+quorum research "Which claims does this evidence support?" \
+  --file report.pdf --file metrics.csv \
+  --provider deepseek --prepare review-manifest.json
+# Read the printed preview and the mode-0600 manifest, then approve its exact hash:
+quorum research "Which claims does this evidence support?" \
+  --manifest review-manifest.json --provider deepseek \
+  --approve <manifest-sha256> \
+  --json claim-ledger.json
+```
+
+Detected secrets are redacted by default. `--allow-sensitive` is a dangerous,
+prepare-time override. Preparation performs no provider call; execution refuses
+any changed question, provider/model selection, chunks, or manifest hash. The
+CLI output and optional JSON contain the Claim Ledger, not raw source-bearing
+prompts.
 
 ---
 
@@ -256,7 +293,7 @@ Writing a new one is ~5 lines — see `quorum/adapters/base.py`.
 Install locally and use the same adapter shape from a shell:
 
 ```bash
-quorum ask "We need to dedupe 50M records by a fuzzy key. What approach, and what breaks first at scale?" --member deepseek=deepseek --member gpt-5.5="codex exec" --member gemini="gemini -p" --synthesizer deepseek
+quorum ask "We need to dedupe 50M records by a fuzzy key. What approach, and what breaks first at scale?" --member deepseek --member gpt-5.5 --skeptic grok --persona domain_skeptic --synthesizer deepseek
 quorum ask "Is timsort right here?" --member a="python3 -c 'import sys; sys.stdin.read(); print(\"VERDICT: yes\\nCONFIDENCE: 4\")'" --labels yes,no --store quorum-votes.jsonl
 quorum health quorum-votes.jsonl --roster-size 2 --html reports/council_health.html
 quorum auth doctor

@@ -19,6 +19,7 @@ quorum-web = "quorum.web.__main__:main"
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 web = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.27"]
+research = ["pypdf>=5.0", "Pillow>=11.0", "pytesseract>=0.3.13"]
 
 [tool.setuptools.packages.find]
 include = ["quorum*"]

@@ -47,7 +47,7 @@ class Council:
     Example::
 
         council = Council(
-            members=[deepseek, gemini, gpt],
+            members=[deepseek, gpt],
             skeptic=grok,            # adversarial-only by design
             synthesizer=deepseek,    # defaults to the first member
             distiller=None,          # optional semantic consensus mapper

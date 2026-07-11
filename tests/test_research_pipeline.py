@@ -128,3 +128,23 @@ def test_council_research_method_runs_end_to_end():
     verdict = council.research("cats?", chunks)
     assert verdict.ledger.kept
     assert verdict.ledger.dropped
+
+
+def test_fact_check_call_budget_is_bounded_and_fair_across_members():
+    import json
+    from quorum.research.pipeline import MAX_POOLED_CLAIMS
+
+    claims = [
+        {"text": f"claim {i}", "citations": [{"chunk_id": "C1", "quote": "source fact"}]}
+        for i in range(40)
+    ]
+    grounded = json.dumps({"claims": claims})
+    calls = []
+    checker = CallableModel("checker", lambda prompt: calls.append(prompt) or "VERDICT: Supported")
+    verdict = run_research(
+        [_model("A", grounded=grounded), _model("B", grounded=grounded)],
+        "q", chunk_text("source fact"), skeptic=checker,
+    )
+    assert len(verdict.ledger.claims) == MAX_POOLED_CLAIMS == 24
+    assert len(calls) == MAX_POOLED_CLAIMS
+    assert {claim.asserted_by[0] for claim in verdict.ledger.claims} == {"A", "B"}

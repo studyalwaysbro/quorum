@@ -275,22 +275,25 @@
   <div id="research-view" hidden>
     <div class="card composer">
       <div id="dropzone" class="dropzone" tabindex="0">
-        <input type="file" id="rfiles" accept=".txt,.md,.markdown,.text" multiple hidden>
-        <div class="dz-inner">Drop a <b>.txt</b> / <b>.md</b> file here, or <span class="dz-link">browse</span><br>
-          <span class="dz-sub">treated as untrusted source · stays on your machine · demo models</span></div>
+        <input type="file" id="rfiles" accept=".txt,.md,.markdown,.text,.csv,.tsv,.json,.pdf,.png,.jpg,.jpeg,.webp" multiple hidden>
+        <div class="dz-inner">Drop text, data, PDF, or OCR-ready image files here, or <span class="dz-link">browse</span><br>
+          <span class="dz-sub">untrusted by default · locally bounded and redacted before analysis</span></div>
       </div>
       <div id="filelist" class="filelist"></div>
       <textarea id="rq" placeholder="What should the council investigate in this document?">What are the main claims, and which are actually supported by the source?</textarea>
       <div class="controls">
-        <span class="group-label">Source-grounded council → adversarial fact-check → Claim Ledger</span>
+        <span class="group-label">Mode</span>
+        <select id="rmode" class="persona-sel"><option value="demo">Demo (never leaves this process)</option><option value="remote">Remote APIs (tool-free)</option></select>
+        <span class="group-label">Providers</span><div id="rproviders" class="members"></div>
         <button class="go" id="rgo">Investigate</button>
       </div>
+      <div id="rpreview"></div>
     </div>
     <div id="rresults"></div>
     <div id="ledger"></div>
   </div>
 
-  <p class="footnote" id="foot">Demo mode uses keyless stub models so the mechanic runs instantly. Local mode drives installed, allowlisted CLIs only after an audition gate; agentic CLIs require explicit opt-in. No keys, prompts, or transcripts ever leave your machine.</p>
+  <p class="footnote" id="foot">Demo stays local. Normal local councils use allowlisted CLIs. Attachment research never uses those agentic CLIs: remote mode sends redacted extracted text only to explicitly selected, fixed-host, tool-free APIs after per-run consent.</p>
 </div>
 
 <script>
@@ -309,7 +312,7 @@ const STAGE_META = {
 };
 
 let MODE = "demo";
-let ROSTER = { demo: { members: [], all_members: [], skeptic: "Vex" }, local: [], localInfo: {}, skeptic_name: "Vex" };
+let ROSTER = { demo: { members: [], all_members: [], skeptic: "Vex" }, local: [], localInfo: {}, remote: [], skeptic_name: "Vex" };
 let selectedMembers = new Set();
 let skepticOn = true;
 let es = null;
@@ -407,10 +410,12 @@ async function loadRoster() {
     const avail = (caps.local || []).filter(m => m.available);
     ROSTER.local = avail.map(m => m.id);
     ROSTER.localInfo = Object.fromEntries(avail.map(m => [m.id, m]));
+    ROSTER.remote = caps.remote || [];
     ROSTER.personas = caps.personas || [];
   } catch (e) {
     ROSTER.demo = { members: ["Atlas","Beacon","Cypher"], all_members: ["Atlas","Beacon","Cypher","Juno"], skeptic: "Vex" };
     ROSTER.local = [];
+    ROSTER.remote = [];
     ROSTER.personas = [];
   }
   const sel = $("persona");
@@ -428,6 +433,7 @@ async function loadRoster() {
   }
   defaultSelection();
   renderMembers();
+  renderRemoteProviders();
 }
 
 function stageEl(round) {
@@ -693,7 +699,7 @@ document.querySelectorAll(".tab").forEach(t => {
 // ---------- research upload ----------
 let researchFiles = [];
 let res = null;
-const ALLOWED_RESEARCH = [".txt", ".md", ".markdown", ".text"];
+const ALLOWED_RESEARCH = [".txt", ".md", ".markdown", ".text", ".csv", ".tsv", ".json", ".pdf", ".png", ".jpg", ".jpeg", ".webp"];
 const dz = $("dropzone"), rfiles = $("rfiles");
 dz.onclick = () => rfiles.click();
 dz.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); rfiles.click(); } };
@@ -705,9 +711,9 @@ rfiles.addEventListener("change", () => { addResearchFiles(rfiles.files); rfiles
 function addResearchFiles(list) {
   for (const f of list) {
     if (!ALLOWED_RESEARCH.some(e => f.name.toLowerCase().endsWith(e))) {
-      showResearchError(`“${f.name}” isn’t a .txt or .md file`); continue;
+      showResearchError(`“${f.name}” isn’t a supported attachment type`); continue;
     }
-    if (researchFiles.length >= 4) { showResearchError("max 4 files"); break; }
+    if (researchFiles.length >= 8) { showResearchError("max 8 files"); break; }
     researchFiles.push(f);
   }
   renderFiles();
@@ -731,21 +737,37 @@ function showResearchError(msg) {
 async function investigate() {
   const question = $("rq").value.trim();
   if (!question) { $("rq").focus(); return; }
-  if (!researchFiles.length) { showResearchError("add a .txt or .md file first"); return; }
+  if (!researchFiles.length) { showResearchError("add at least one supported attachment first"); return; }
   if (res) res.close();
   $("rresults").innerHTML = ""; $("ledger").innerHTML = "";
   $("rgo").disabled = true;
 
   const fd = new FormData();
   fd.append("question", question);
-  fd.append("mode", "demo");
+  const researchMode = $("rmode").value;
+  fd.append("mode", researchMode);
+  if (researchMode === "remote") {
+    const providers = [...document.querySelectorAll('#rproviders input:checked')].map(x => x.value);
+    if (!providers.length) { showResearchError("select at least one configured remote provider"); $("rgo").disabled = false; return; }
+    fd.append("providers", providers.join(","));
+  }
   researchFiles.forEach(f => fd.append("files", f, f.name));
 
   let runId;
   try {
     const resp = await fetch("/api/research-runs", { method: "POST", headers: { "X-Quorum-CSRF": "1" }, body: fd });
     if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.detail || ("HTTP " + resp.status)); }
-    runId = (await resp.json()).run_id;
+    const started = await resp.json();
+    runId = started.run_id;
+    if (started.secret_findings_redacted || started.injection_hints) {
+      const note = document.createElement("div"); note.className = "refused-note";
+      note.textContent = `Preflight: ${started.secret_findings_redacted || 0} likely secret(s) redacted; ${started.injection_hints || 0} instruction-like source passage(s) treated as untrusted data.`;
+      $("rresults").appendChild(note);
+    }
+    if (started.requires_approval && !(await reviewPreparedRun(runId, started))) {
+      $("rgo").disabled = false;
+      return;
+    }
   } catch (err) { showResearchError("Could not start: " + err.message); $("rgo").disabled = false; return; }
 
   res = new EventSource("/api/research-runs/" + encodeURIComponent(runId) + "/events");
@@ -764,6 +786,57 @@ async function investigate() {
   };
 }
 $("rgo").onclick = investigate;
+$("rmode").onchange = () => {
+  const remote = $("rmode").value === "remote";
+  $("rproviders").style.display = remote ? "flex" : "none";
+};
+
+function reviewPreparedRun(runId, started) {
+  return new Promise(resolve => {
+    const box = $("rpreview"); box.innerHTML = "";
+    const card = document.createElement("div"); card.className = "claim qualified";
+    const title = document.createElement("div"); title.className = "ctext";
+    title.textContent = "Review the complete redacted manifest before remote egress";
+    const meta = document.createElement("div"); meta.className = "cmeta";
+    meta.textContent = `Providers: ${(started.providers || []).map(p => `${p.label || p.id} / ${p.model}`).join(", ")} · manifest ${started.manifest_hash}`;
+    const preview = document.createElement("pre"); preview.className = "body";
+    preview.style.maxHeight = "320px"; preview.style.overflow = "auto";
+    preview.textContent = JSON.stringify(started.manifest || {}, null, 2);
+    const warning = document.createElement("div"); warning.className = "refused-note";
+    warning.textContent = "The complete locally prepared manifest is shown above. Pattern matching is incomplete—cancel if any source may be sensitive.";
+    const tools = document.createElement("div"); tools.className = "tools";
+    const approve = document.createElement("button"); approve.className = "go"; approve.textContent = "Approve this exact manifest";
+    const cancel = document.createElement("button"); cancel.className = "tool"; cancel.textContent = "Cancel";
+    const download = document.createElement("button"); download.className = "tool"; download.textContent = "Download manifest for full review";
+    download.onclick = () => {
+      const blob = new Blob([JSON.stringify(started.manifest || {}, null, 2)], {type: "application/json"});
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `quorum-manifest-${started.manifest_hash}.json`; a.click();
+    };
+    approve.onclick = async () => {
+      approve.disabled = true;
+      try {
+        const response = await fetch(`/api/research-runs/${encodeURIComponent(runId)}/approve`, {
+          method: "POST", headers: {"Content-Type": "application/json", "X-Quorum-CSRF": "1"},
+          body: JSON.stringify({manifest_hash: started.manifest_hash}),
+        });
+        if (!response.ok) { const e = await response.json().catch(() => ({})); throw new Error(e.detail || `HTTP ${response.status}`); }
+        box.innerHTML = ""; resolve(true);
+      } catch (error) { showResearchError("Approval failed: " + error.message); approve.disabled = false; }
+    };
+    cancel.onclick = () => { box.innerHTML = ""; resolve(false); };
+    tools.append(download, approve, cancel); card.append(title, meta, preview, warning, tools); box.appendChild(card);
+  });
+}
+
+function renderRemoteProviders() {
+  const box = $("rproviders"); box.innerHTML = ""; box.style.display = "none";
+  (ROSTER.remote || []).forEach(p => {
+    const label = document.createElement("label"); label.className = "mchip";
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.value = p.id; cb.disabled = !p.configured;
+    const text = document.createElement("span"); text.textContent = `${p.label} · ${p.default_model}${p.configured ? "" : " (API key not configured)"}`;
+    label.append(cb, text); box.appendChild(label);
+  });
+}
 
 function setResearchStage(round, status) {
   const labels = { grounded_blind: "Reading the source & extracting cited claims",

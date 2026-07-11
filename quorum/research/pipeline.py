@@ -18,6 +18,19 @@ from quorum.research.rounds import fact_check, grounded_blind
 from quorum.research.schema import SourceChunk
 from quorum.transcript import Transcript
 
+MAX_POOLED_CLAIMS = 24
+
+
+def pool_claims_bounded(per_member: dict, members: Sequence[Model]) -> list:
+    """Round-robin claims under the shared remote fact-check call budget."""
+    queues = [list(per_member.get(member.name, [])) for member in members]
+    pooled = []
+    while len(pooled) < MAX_POOLED_CLAIMS and any(queues):
+        for queue in queues:
+            if queue and len(pooled) < MAX_POOLED_CLAIMS:
+                pooled.append(queue.pop(0))
+    return pooled
+
 
 @dataclass
 class ResearchVerdict:
@@ -42,7 +55,10 @@ def run_research(
 
     # grounded_blind already assigned global, stable ids (K1, K2, …) that match
     # the transcript metadata; just pool them in member order.
-    pooled = [claim for member in members for claim in per_member.get(member.name, [])]
+    # Bound fact-check amplification and interleave members fairly so one
+    # injection-driven verbose member cannot consume the entire remote-call
+    # budget before another member contributes.
+    pooled = pool_claims_bounded(per_member, members)
 
     checker = skeptic or members[0]
     for claim in pooled:

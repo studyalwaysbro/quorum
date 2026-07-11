@@ -38,7 +38,7 @@ class LocalModelSpec:
 
 # The allowlist. Transport verified by hand:
 #   claude -p "<prompt>" / gemini -p "<prompt>" / grok -p "<prompt>"  -> arg
-#   deepseek / codex exec                                            -> stdin
+#   deepseek / codex exec --skip-git-repo-check                      -> stdin
 LOCAL_CATALOG: list[LocalModelSpec] = [
     LocalModelSpec(
         id="claude", label="Claude", command=("claude", "-p"),
@@ -47,8 +47,8 @@ LOCAL_CATALOG: list[LocalModelSpec] = [
     ),
     LocalModelSpec(
         id="gemini", label="Gemini", command=("gemini", "-p"),
-        prompt_transport="arg", agentic=False, enabled_by_default=True,
-        note="Google Gemini CLI, single-turn prompt.",
+        prompt_transport="arg", agentic=False, enabled_by_default=False,
+        note="Retired locally: Gemini CLI returns IneligibleTierError; kept only so audition can quarantine it.",
     ),
     LocalModelSpec(
         id="grok", label="Grok", command=("grok", "-p"),
@@ -56,9 +56,9 @@ LOCAL_CATALOG: list[LocalModelSpec] = [
         note="xAI Grok single-turn (-p); needs `grok` OAuth sign-in; agentic.",
     ),
     LocalModelSpec(
-        id="gpt-5.5", label="GPT-5.5 (codex)", command=("codex", "exec"),
+        id="gpt-5.5", label="GPT-5.5 (codex)", command=("codex", "exec", "--skip-git-repo-check"),
         prompt_transport="stdin", agentic=True, enabled_by_default=False,
-        note="OpenAI codex agent; runs tools — opt in knowingly.",
+        note="OpenAI codex agent; runs tools and may run outside git repos via --skip-git-repo-check.",
     ),
     LocalModelSpec(
         id="deepseek", label="DeepSeek", command=("deepseek",),

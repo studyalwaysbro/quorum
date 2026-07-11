@@ -12,11 +12,12 @@ Edit the argv / functions below to match your setup, then run:
 """
 
 from quorum import CallableModel, CLIModel, Council
+from quorum.providers import build_local_model
 
 # --- Option 1: CLI tools (each reads the prompt on stdin) ---------------
-deepseek = CLIModel("deepseek", ["deepseek"])
-gpt = CLIModel("gpt-5.5", ["codex", "--quiet"])
-gemini = CLIModel("gemini", ["gemini", "-p"])
+deepseek = build_local_model("deepseek")
+gpt = build_local_model("gpt-5.5")
+grok = build_local_model("grok")  # adversarial-only by local policy
 
 
 # --- Option 2: your own HTTP client wrapped as a callable ---------------
@@ -30,8 +31,8 @@ custom = CallableModel("my-api", my_http_client)
 
 if __name__ == "__main__":
     council = Council(
-        members=[deepseek, gpt, gemini],
-        skeptic=None,          # add an adversarial-only model here if you want one
+        members=[deepseek, gpt],
+        skeptic=grok,
         synthesizer=deepseek,
     )
     verdict = council.ask(
